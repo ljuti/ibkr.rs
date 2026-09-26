@@ -13,6 +13,7 @@ to every call.
 
 | Area | Commands | State |
 |------|----------|-------|
+| Setup | `configure`, `configure --show` | implemented |
 | Health | `health` | implemented |
 | Contracts | `contracts details`, `contracts search` | implemented |
 | Market data | `market-data historical` | implemented |
@@ -73,7 +74,22 @@ rust-toolchain.toml  # pinned toolchain (1.94.1), shared with CI
 
 ## Quick start
 
-The gateway must be running first. Two options.
+Run `ibkr configure` once. It prompts for the gateway URL, the bearer token and
+the certificate paths (the token is typed without echo), writes them to
+`~/.config/ibkr/config.toml` with mode `0600`, and checks the connection before
+finishing. Every later command uses that file, so nothing needs exporting:
+
+```bash
+ibkr configure                    # prompt for each setting
+ibkr configure --show             # what is effective, and where each value came from
+ibkr health
+```
+
+Non-interactive setups pass the values as flags
+(`ibkr configure --url https://host:8090 --token … --ca-cert …/ca.pem …`); the
+environment variables below still work and still win over the file, which is
+what CI and throwaway shells usually want. The gateway must be running first —
+the two ways to get one:
 
 **A. Gateway in the devcontainer stack** (needs the sibling repo checked out at
 `../ibkr-gateway`):
@@ -141,6 +157,7 @@ table below), point the shell at it once (`.env` in `~/.bashrc`), or use
 | `--max-retries` | `IBKR_GATEWAY_MAX_RETRIES` | `3` |
 | `--tls-skip-verify` | `IBKR_GATEWAY_TLS_SKIP_VERIFY` | `false` |
 | `--db` | `IBKR_STORE_DB` | `ibkr.db` |
+| `--config` | `IBKR_CONFIG` | `$XDG_CONFIG_HOME/ibkr/config.toml` |
 | `-o, --output` | — | `json` |
 
 Errors are mapped onto the gateway's machine-readable `kind` values in

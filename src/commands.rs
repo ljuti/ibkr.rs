@@ -11,6 +11,7 @@ use crate::cli::{
 };
 use crate::client::{Client, Conditional, RetryAttempt, RetryObserver};
 use crate::config::Config;
+use crate::configure;
 use crate::error::{Error, Result};
 use crate::output;
 use crate::store::{Store, SyncOutcome};
@@ -32,6 +33,9 @@ pub async fn execute(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Health => output::health(&client.health().await?, mode),
+        Command::Configure { show, verify } => {
+            configure::run(cli.global.overrides(), show, verify, mode).await
+        }
         Command::Contracts(command) => contracts(&client, command, mode).await,
         Command::MarketData(command) => market_data(&client, command, mode).await,
         Command::Accounts(command) => accounts(&client, command, mode).await,

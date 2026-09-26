@@ -1,8 +1,12 @@
 //! Client configuration, resolved from CLI flags, the environment and defaults.
 
+use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -26,6 +30,8 @@ pub mod var {
     pub const TLS_SKIP_VERIFY: &str = "IBKR_GATEWAY_TLS_SKIP_VERIFY";
     /// Local store database file used by `ibkr store`.
     pub const STORE_DB: &str = "IBKR_STORE_DB";
+    /// Configuration file holding settings written by `ibkr configure`.
+    pub const CONFIG: &str = "IBKR_CONFIG";
 }
 
 /// Default gateway URL, matching the gateway's own `BIND_ADDR` default.
@@ -42,6 +48,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
 /// Default local store database (relative to the working directory).
 pub const DEFAULT_STORE_DB: &str = "ibkr.db";
+/// Default configuration file, under the user's config directory
+/// (`$XDG_CONFIG_HOME/ibkr/config.toml`, `~/.config/ibkr/config.toml`).
+pub const DEFAULT_CONFIG_FILE: &str = "ibkr/config.toml";
 
 /// Resolved client configuration.
 #[derive(Debug, Clone)]
@@ -64,6 +73,12 @@ pub struct Config {
     pub tls_skip_verify: bool,
     /// `SQLite` file backing `ibkr store`.
     pub db: PathBuf,
+    /// Configuration file these settings were resolved with.
+    pub config_path: PathBuf,
+    /// What that file contained (empty when it does not exist).
+    pub file: ConfigFile,
+    /// Which layer supplied each setting, keyed as in [`ConfigFile`].
+    pub sources: BTreeMap<&'static str, Source>,
 }
 
 /// Command-line values that override the environment.
@@ -90,6 +105,202 @@ pub struct ConfigOverrides {
     pub tls_skip_verify: Option<bool>,
     /// Override for [`var::STORE_DB`].
     pub db: Option<PathBuf>,
+    /// Override for [`var::CONFIG`]: which file to read and write.
+    pub config: Option<PathBuf>,
+}
+
+/// Settings that live in the configuration file.
+///
+/// Field names mirror the command-line flags, so a key reads the same however
+/// it is set: `--ca-cert`, `IBKR_GATEWAY_CA_CERT` or `ca-cert = "…"`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ConfigFile {
+    /// Gateway base URL.
+    pub url: Option<String>,
+    /// Bearer token presented on `/api/v1/*` requests.
+    pub token: Option<String>,
+    /// PEM file with the CA that signed the gateway's server certificate.
+    pub ca_cert: Option<PathBuf>,
+    /// PEM client certificate for mutual TLS.
+    pub client_cert: Option<PathBuf>,
+    /// PEM private key matching `client-cert`.
+    pub client_key: Option<PathBuf>,
+    /// Request timeout in seconds.
+    pub timeout: Option<u64>,
+    /// Retries for rate-limited reads.
+    pub max_retries: Option<u32>,
+    /// Accept invalid server certificates (development only).
+    pub tls_skip_verify: Option<bool>,
+    /// Local store database used by `ibkr store`.
+    pub db: Option<PathBuf>,
+}
+
+impl ConfigFile {
+    /// Read the file, or an empty configuration when it does not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when the file exists but cannot be read or
+    /// parsed, and [`Error::Io`] for a read failure that is not a missing file.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        toml::from_str(&text).map_err(|error| Error::Config(format!("{}: {error}", path.display())))
+    }
+
+    /// Write the file, readable only by its owner: it holds a bearer token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when the settings cannot be serialized and
+    /// [`Error::Io`] when the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let body = toml::to_string_pretty(self)
+            .map_err(|error| Error::Config(format!("cannot serialize configuration: {error}")))?;
+        let text = format!(
+            "# Written by `ibkr configure`. Settings resolve as:\n\
+             #   flags > environment > this file > defaults.\n{body}"
+        );
+        write_private(path, &text)?;
+        Ok(())
+    }
+
+    /// Whether the file has a mode anyone else can read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the metadata cannot be read.
+    pub fn is_world_readable(path: &Path) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(path)?.permissions().mode();
+            Ok(mode & 0o077 != 0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(false)
+        }
+    }
+}
+
+/// Write a file only its owner can read.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+        // An existing file keeps its old mode through `open`, so set it too.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+    }
+}
+
+/// Where a resolved setting came from, for `configure --show`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Source {
+    /// A command-line flag.
+    Flag,
+    /// An environment variable.
+    Environment,
+    /// The configuration file.
+    File,
+    /// A built-in default (or nothing at all, for settings that may be unset).
+    #[default]
+    Default,
+}
+
+impl Source {
+    /// Human-readable name used in diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Environment => "env",
+            Self::File => "file",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Configuration file the client reads and `ibkr configure` writes.
+///
+/// `--config` beats `IBKR_CONFIG`, which beats the XDG default. Nothing is
+/// created until `configure` runs: a missing file is simply empty settings.
+pub fn config_path<F>(overrides: &ConfigOverrides, lookup: &F) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(path) = &overrides.config {
+        return path.clone();
+    }
+    if let Some(path) = env_string(lookup, var::CONFIG) {
+        return PathBuf::from(path);
+    }
+    let base = env_string(lookup, "XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env_string(lookup, "HOME").map(|home| PathBuf::from(home).join(".config")));
+    match base {
+        Some(directory) => directory.join(DEFAULT_CONFIG_FILE),
+        None => PathBuf::from(DEFAULT_CONFIG_FILE),
+    }
+}
+
+/// Resolve one setting from the layers that can supply it.
+fn setting<T>(flag: Option<T>, environment: Option<T>, file: Option<T>, default: T) -> (T, Source) {
+    if let Some(value) = flag {
+        return (value, Source::Flag);
+    }
+    if let Some(value) = environment {
+        return (value, Source::Environment);
+    }
+    if let Some(value) = file {
+        return (value, Source::File);
+    }
+    (default, Source::Default)
+}
+
+/// Resolve one optional setting (a token or a certificate path).
+fn optional_setting<T>(
+    flag: Option<T>,
+    environment: Option<T>,
+    file: Option<T>,
+) -> (Option<T>, Source) {
+    if let Some(value) = flag {
+        return (Some(value), Source::Flag);
+    }
+    if let Some(value) = environment {
+        return (Some(value), Source::Environment);
+    }
+    if let Some(value) = file {
+        return (Some(value), Source::File);
+    }
+    (None, Source::Default)
 }
 
 impl Config {
@@ -120,69 +331,125 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let base_url = overrides
-            .base_url
-            .or_else(|| env_string(&lookup, var::URL))
-            .unwrap_or_else(|| DEFAULT_URL.to_owned())
-            .trim_end_matches('/')
-            .to_owned();
+        let config_path = config_path(&overrides, &lookup);
+        let file = ConfigFile::load(&config_path)?;
+        Self::resolve_layers(overrides, lookup, file, config_path)
+    }
 
-        let token = overrides.token.or_else(|| env_string(&lookup, var::TOKEN));
+    /// Resolve from an already-read configuration file.
+    ///
+    /// Split out so the wizard can resolve without re-reading the file it is
+    /// about to write.
+    pub(crate) fn resolve_layers<F>(
+        overrides: ConfigOverrides,
+        lookup: F,
+        file: ConfigFile,
+        config_path: PathBuf,
+    ) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let mut sources = BTreeMap::new();
+        let record =
+            |sources: &mut BTreeMap<&'static str, Source>, key: &'static str, source: Source| {
+                sources.insert(key, source);
+            };
 
-        let timeout = overrides
-            .timeout
-            .or_else(|| {
-                env_string(&lookup, var::TIMEOUT_SEC)
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-            })
-            .unwrap_or(DEFAULT_TIMEOUT);
+        let (base_url, source) = setting(
+            overrides.base_url,
+            env_string(&lookup, var::URL),
+            file.url.clone(),
+            DEFAULT_URL.to_owned(),
+        );
+        record(&mut sources, "url", source);
+
+        let (token, source) = optional_setting(
+            overrides.token,
+            env_string(&lookup, var::TOKEN),
+            file.token.clone(),
+        );
+        record(&mut sources, "token", source);
+
+        let (timeout_secs, source) = setting(
+            overrides.timeout.map(|value| value.as_secs()),
+            env_string(&lookup, var::TIMEOUT_SEC).and_then(|value| value.parse::<u64>().ok()),
+            file.timeout,
+            DEFAULT_TIMEOUT.as_secs(),
+        );
+        record(&mut sources, "timeout", source);
+
+        let (max_retries, source) = setting(
+            overrides.max_retries,
+            env_string(&lookup, var::MAX_RETRIES).and_then(|value| value.parse::<u32>().ok()),
+            file.max_retries,
+            DEFAULT_MAX_RETRIES,
+        );
+        record(&mut sources, "max-retries", source);
+
+        let (tls_skip_verify, source) = setting(
+            overrides.tls_skip_verify,
+            env_string(&lookup, var::TLS_SKIP_VERIFY).map(|value| is_truthy(&value)),
+            file.tls_skip_verify,
+            false,
+        );
+        record(&mut sources, "tls-skip-verify", source);
+
+        let (db, source) = setting(
+            overrides.db,
+            env_string(&lookup, var::STORE_DB).map(PathBuf::from),
+            file.db.clone(),
+            PathBuf::from(DEFAULT_STORE_DB),
+        );
+        record(&mut sources, "db", source);
 
         // The client keypair is all-or-nothing per source: when either half is
-        // configured explicitly, the other half must be too. Filling the
-        // missing half from the repo defaults would silently pair a supplied
-        // certificate with an unrelated local key.
-        let explicit_cert = overrides
-            .client_cert
-            .or_else(|| env_string(&lookup, var::CLIENT_CERT).map(PathBuf::from));
-        let explicit_key = overrides
-            .client_key
-            .or_else(|| env_string(&lookup, var::CLIENT_KEY).map(PathBuf::from));
-        let (client_cert, client_key) = if explicit_cert.is_some() || explicit_key.is_some() {
-            (explicit_cert, explicit_key)
+        // configured anywhere but the defaults, the other must be too. Filling
+        // the missing half from the repo defaults would silently pair a
+        // supplied certificate with an unrelated local key.
+        let flag_cert = overrides.client_cert;
+        let env_cert = env_string(&lookup, var::CLIENT_CERT).map(PathBuf::from);
+        let flag_key = overrides.client_key;
+        let env_key = env_string(&lookup, var::CLIENT_KEY).map(PathBuf::from);
+        let configured = flag_cert.is_some()
+            || env_cert.is_some()
+            || file.client_cert.is_some()
+            || flag_key.is_some()
+            || env_key.is_some()
+            || file.client_key.is_some();
+        let (client_cert, cert_source) = if configured {
+            optional_setting(flag_cert, env_cert, file.client_cert.clone())
         } else {
-            (
-                existing_default(DEFAULT_CLIENT_CERT),
-                existing_default(DEFAULT_CLIENT_KEY),
-            )
+            (existing_default(DEFAULT_CLIENT_CERT), Source::Default)
         };
+        let (client_key, key_source) = if configured {
+            optional_setting(flag_key, env_key, file.client_key.clone())
+        } else {
+            (existing_default(DEFAULT_CLIENT_KEY), Source::Default)
+        };
+        record(&mut sources, "client-cert", cert_source);
+        record(&mut sources, "client-key", key_source);
+
+        let (ca_cert, source) = optional_setting(
+            overrides.ca_cert,
+            env_string(&lookup, var::CA_CERT).map(PathBuf::from),
+            file.ca_cert.clone(),
+        );
+        let ca_cert = ca_cert.or_else(|| existing_default(DEFAULT_CA_CERT));
+        record(&mut sources, "ca-cert", source);
 
         let config = Self {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_owned(),
             token,
-            ca_cert: path_override(overrides.ca_cert, var::CA_CERT, DEFAULT_CA_CERT, &lookup),
+            ca_cert,
             client_cert,
             client_key,
-            timeout,
-            max_retries: overrides
-                .max_retries
-                .or_else(|| {
-                    env_string(&lookup, var::MAX_RETRIES)
-                        .and_then(|value| value.parse::<u32>().ok())
-                })
-                .unwrap_or(DEFAULT_MAX_RETRIES),
-            tls_skip_verify: overrides
-                .tls_skip_verify
-                .or_else(|| {
-                    env_string(&lookup, var::TLS_SKIP_VERIFY).map(|value| is_truthy(&value))
-                })
-                .unwrap_or(false),
-            // Unlike the certificates, the store is created on first use, so a
-            // missing file is not an error and no existence check applies.
-            db: overrides
-                .db
-                .or_else(|| env_string(&lookup, var::STORE_DB).map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_STORE_DB)),
+            timeout: Duration::from_secs(timeout_secs),
+            max_retries,
+            tls_skip_verify,
+            db,
+            config_path,
+            file,
+            sources,
         };
         config.validate()?;
         Ok(config)
@@ -217,26 +484,6 @@ where
     lookup(key).filter(|value| !value.trim().is_empty())
 }
 
-/// Resolve a certificate path: explicit value, else environment variable, else
-/// the default path when that file exists on disk.
-fn path_override<F>(
-    explicit: Option<PathBuf>,
-    key: &str,
-    default: &str,
-    lookup: &F,
-) -> Option<PathBuf>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if explicit.is_some() {
-        return explicit;
-    }
-    if let Some(value) = env_string(lookup, key) {
-        return Some(PathBuf::from(value));
-    }
-    existing_default(default)
-}
-
 /// The default path, when that file exists on disk.
 fn existing_default(path: &str) -> Option<PathBuf> {
     let candidate = Path::new(path);
@@ -244,7 +491,7 @@ fn existing_default(path: &str) -> Option<PathBuf> {
 }
 
 /// Interpret a boolean-ish environment value.
-fn is_truthy(value: &str) -> bool {
+pub fn is_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
@@ -390,31 +637,165 @@ mod tests {
     }
 
     #[test]
-    fn path_override_prefers_explicit_then_env_then_existing_default() {
-        let lookup = env(&[(var::CA_CERT, "from-env.pem")]);
+    fn settings_resolve_flag_then_environment_then_file_then_default() {
+        let path = temp_config("layers");
+        let file = ConfigFile {
+            url: Some("https://from-file:1".to_owned()),
+            timeout: Some(11),
+            ..ConfigFile::default()
+        };
+        file.save(&path).unwrap();
 
-        // Explicit value wins over the environment.
-        let explicit = path_override(
-            Some(PathBuf::from("explicit.pem")),
-            var::CA_CERT,
-            "Cargo.toml",
-            &lookup,
-        );
-        assert_eq!(explicit, Some(PathBuf::from("explicit.pem")));
+        // File beats defaults.
+        let lookup = env(&[]);
+        let overrides = ConfigOverrides {
+            config: Some(path.clone()),
+            ..ConfigOverrides::default()
+        };
+        let config = Config::resolve_with(overrides.clone(), lookup).unwrap();
+        assert_eq!(config.base_url, "https://from-file:1");
+        assert_eq!(config.timeout, Duration::from_secs(11));
+        assert_eq!(config.sources.get("url"), Some(&Source::File));
 
-        // Environment wins over the default.
-        let from_env = path_override(None, var::CA_CERT, "Cargo.toml", &lookup);
-        assert_eq!(from_env, Some(PathBuf::from("from-env.pem")));
+        // Environment beats file.
+        let lookup = env(&[(var::URL, "https://from-env:2"), (var::TIMEOUT_SEC, "22")]);
+        let config = Config::resolve_with(overrides.clone(), lookup).unwrap();
+        assert_eq!(config.base_url, "https://from-env:2");
+        assert_eq!(config.timeout, Duration::from_secs(22));
+        assert_eq!(config.sources.get("url"), Some(&Source::Environment));
+
+        // Flags beat environment.
+        let lookup = env(&[(var::URL, "https://from-env:2")]);
+        let flags = ConfigOverrides {
+            config: Some(path.clone()),
+            base_url: Some("https://from-flag:3".to_owned()),
+            ..ConfigOverrides::default()
+        };
+        let config = Config::resolve_with(flags, lookup).unwrap();
+        assert_eq!(config.base_url, "https://from-flag:3");
+        assert_eq!(config.sources.get("url"), Some(&Source::Flag));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
-    fn default_path_applies_only_when_the_file_exists() {
-        // Tests run with the crate root as the working directory.
-        let none = path_override(None, var::CA_CERT, "missing-file.pem", &env(&[]));
-        assert_eq!(none, None);
+    fn a_missing_config_file_is_empty_settings_not_an_error() {
+        let path = temp_config("absent");
+        let config = Config::resolve_with(
+            ConfigOverrides {
+                config: Some(path.clone()),
+                ..ConfigOverrides::default()
+            },
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(config.base_url, DEFAULT_URL);
+        assert_eq!(config.config_path, path);
+        assert!(config.file.url.is_none());
+    }
 
-        let existing = path_override(None, var::CA_CERT, "Cargo.toml", &env(&[]));
-        assert_eq!(existing, Some(PathBuf::from("Cargo.toml")));
+    #[test]
+    fn a_malformed_config_file_says_which_file_it_is() {
+        let path = temp_config("malformed");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "url = https://not-quoted\n").unwrap();
+        let error = Config::resolve_with(
+            ConfigOverrides {
+                config: Some(path.clone()),
+                ..ConfigOverrides::default()
+            },
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("malformed"), "{error}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_unknown_config_key_is_rejected_rather_than_ignored() {
+        let path = temp_config("unknown-key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "url = \"https://host\"\ntypo = 1\n").unwrap();
+        let error = Config::resolve_with(
+            ConfigOverrides {
+                config: Some(path.clone()),
+                ..ConfigOverrides::default()
+            },
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("typo"), "{error}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_config_file_is_written_for_the_owner_only() {
+        let path = temp_config("private");
+        let file = ConfigFile {
+            token: Some("secret-token".to_owned()),
+            ..ConfigFile::default()
+        };
+        file.save(&path).unwrap();
+
+        let written = ConfigFile::load(&path).unwrap();
+        assert_eq!(written.token.as_deref(), Some("secret-token"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a file holding a token must be private"
+            );
+        }
+        assert!(!ConfigFile::is_world_readable(&path).unwrap());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn config_path_follows_flag_then_environment_then_xdg() {
+        let lookup = env(&[
+            ("XDG_CONFIG_HOME", "/xdg/config"),
+            ("HOME", "/home/someone"),
+        ]);
+        let overrides = ConfigOverrides::default();
+        assert_eq!(
+            config_path(&overrides, &lookup),
+            PathBuf::from("/xdg/config").join(DEFAULT_CONFIG_FILE)
+        );
+
+        let lookup = env(&[("HOME", "/home/someone")]);
+        assert_eq!(
+            config_path(&overrides, &lookup),
+            PathBuf::from("/home/someone/.config").join(DEFAULT_CONFIG_FILE)
+        );
+
+        let lookup = env(&[
+            (var::CONFIG, "/custom/config.toml"),
+            ("XDG_CONFIG_HOME", "/xdg/config"),
+        ]);
+        assert_eq!(
+            config_path(&overrides, &lookup),
+            PathBuf::from("/custom/config.toml")
+        );
+
+        let lookup = env(&[(var::CONFIG, "/custom/config.toml")]);
+        let flags = ConfigOverrides {
+            config: Some(PathBuf::from("/flag/config.toml")),
+            ..ConfigOverrides::default()
+        };
+        assert_eq!(
+            config_path(&flags, &lookup),
+            PathBuf::from("/flag/config.toml")
+        );
+    }
+
+    /// A config file path inside its own temporary directory.
+    fn temp_config(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("ibkr-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        directory.join("config.toml")
     }
 
     #[test]

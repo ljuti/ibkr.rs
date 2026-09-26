@@ -80,6 +80,10 @@ pub struct GlobalArgs {
     #[arg(long, value_name = "PATH", global = true)]
     pub db: Option<PathBuf>,
 
+    /// Configuration file read by every command (env: `IBKR_CONFIG`).
+    #[arg(long, value_name = "PATH", global = true)]
+    pub config: Option<PathBuf>,
+
     /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t = Output::Json, global = true)]
     pub output: Output,
@@ -102,6 +106,7 @@ impl GlobalArgs {
             max_retries: self.max_retries,
             tls_skip_verify: self.tls_skip_verify.then_some(true),
             db: self.db.clone(),
+            config: self.config.clone(),
         }
     }
 
@@ -157,6 +162,22 @@ pub enum Command {
     /// Gateway and broker connectivity.
     Health,
 
+    /// Write the settings every command resolves, so `.env` is not needed.
+    ///
+    /// With no flags and a terminal, prompts for each setting (showing what
+    /// each one currently resolves to); otherwise takes whatever the global
+    /// flags supplied. `--show` prints the effective settings, where each came
+    /// from, and the file they would be written to.
+    Configure {
+        /// Print the effective settings and their sources; write nothing.
+        #[arg(long)]
+        show: bool,
+
+        /// Check the gateway with the saved settings before finishing.
+        #[arg(long)]
+        verify: bool,
+    },
+
     /// Contract resolution and symbol search.
     #[command(subcommand)]
     Contracts(ContractsCommand),
@@ -191,6 +212,7 @@ impl Command {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Health => "health",
+            Self::Configure { .. } => "configure",
             Self::Contracts(command) => command.label(),
             Self::MarketData(command) => command.label(),
             Self::Accounts(command) => command.label(),

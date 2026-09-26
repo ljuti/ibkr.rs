@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::cli::RenderMode;
 use crate::client::Conditional;
+use crate::config::Config;
 use crate::error::Result;
 use crate::types::{
     AccountSummaryValue, AckResponse, BracketOrderIdsResponse, CancelResponse, CashTransaction,
@@ -686,6 +687,102 @@ fn cash_table(detail: &[&CashTransaction]) -> Table {
 /// Note the size of a bounded snapshot.
 fn envelope_note(count: usize, label: &str, truncated: bool) {
     note(&format!("{label}: {count} (truncated: {truncated})"));
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Effective settings, where each came from, and the file they live in.
+///
+/// Shows what a command would *use* — flags beat environment beats file beats
+/// defaults — so an ambient variable that shadows the file is visible rather
+/// than surfacing later as a puzzling failure.
+pub fn configure_show(config: &Config, mode: RenderMode) -> Result<()> {
+    let settings: [(&str, String, &str); 9] = [
+        ("url", config.base_url.clone(), "url"),
+        ("token", masked(config.token.as_deref()), "token"),
+        (
+            "ca-cert",
+            config
+                .ca_cert
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+            "ca-cert",
+        ),
+        (
+            "client-cert",
+            config
+                .client_cert
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+            "client-cert",
+        ),
+        (
+            "client-key",
+            config
+                .client_key
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
+            "client-key",
+        ),
+        (
+            "timeout",
+            format!("{}s", config.timeout.as_secs()),
+            "timeout",
+        ),
+        ("max-retries", config.max_retries.to_string(), "max-retries"),
+        (
+            "tls-skip-verify",
+            boolean(config.tls_skip_verify),
+            "tls-skip-verify",
+        ),
+        ("db", config.db.display().to_string(), "db"),
+    ];
+
+    if mode.output == crate::cli::Output::Json {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "configFile".to_owned(),
+            serde_json::json!(config.config_path.display().to_string()),
+        );
+        for (name, value, key) in settings {
+            object.insert(
+                name.to_owned(),
+                serde_json::json!({
+                    "value": value,
+                    "source": config.sources.get(key).copied().unwrap_or_default().label(),
+                }),
+            );
+        }
+        return json(&serde_json::Value::Object(object));
+    }
+
+    let mut table = Table::new(&["setting", "value", "source"]);
+    for (name, value, key) in settings {
+        let source = config
+            .sources
+            .get(key)
+            .copied()
+            .unwrap_or(crate::config::Source::Default);
+        table.push(vec![name.to_owned(), value, source.label().to_owned()]);
+    }
+    print_table(&table, mode)?;
+    note(&format!("config file: {}", config.config_path.display()));
+    Ok(())
+}
+
+/// A secret rendered for display: enough to tell two of them apart, never the
+/// value itself.
+fn masked(secret: Option<&str>) -> String {
+    match secret.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.chars().count() <= 4 => "●●●●".to_owned(),
+        Some(value) => {
+            let head: String = value.chars().take(4).collect();
+            format!("{head}●●●●")
+        }
+        None => "-".to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------
