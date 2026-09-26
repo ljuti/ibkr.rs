@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-time container setup: load .env, warm the dependency cache, and generate
-# the development mTLS certificates.
+# One-time container setup: load .env, warm the dependency cache, generate the
+# development mTLS certificates, and install the OMP agent.
 set -euo pipefail
 
 WORKSPACE="${1:-/workspaces/ibkr.rs}"
@@ -56,7 +56,23 @@ cargo fetch
 echo ".> generating development certificates"
 "$WORKSPACE/scripts/gen-dev-certs.sh"
 
+# OMP coding agent, so the container has an agent available. The installer
+# fetches the latest release binary into ~/.local/bin (non-interactive); the
+# image puts that directory on PATH.
+#
+# Checked by path rather than `command -v`: this script may run before PATH has
+# been refreshed, which would otherwise re-download on every invocation.
+OMP_BIN="${PI_INSTALL_DIR:-$HOME/.local/bin}/omp"
+if [ -x "$OMP_BIN" ]; then
+    echo ".> omp already installed at $OMP_BIN"
+else
+    echo ".> installing omp"
+    curl -fsSL https://omp.sh/install | sh
+fi
+echo "omp: $("$OMP_BIN" --version 2>/dev/null || echo 'not runnable')"
+
 echo "=== post-create complete ==="
 echo "  cargo build          # compile"
 echo "  cargo run -- health  # probe the gateway"
 echo "  just gateway-up      # start the gateway (opt-in compose profile)"
+echo "  omp                  # coding agent in this container"

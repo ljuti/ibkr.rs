@@ -231,7 +231,9 @@ Cargo aliases are defined in `.cargo/config.toml`: `cargo c` (check),
 `.devcontainer/` is a compose-form devcontainer: the workspace container builds
 from `rust:1.94-bookworm` with clippy, rustfmt, `cargo-nextest`, `cargo-deny`
 and `cargo-machete` preinstalled. `post-create.sh` loads `.env`, warms the
-dependency cache, and generates the dev certificates.
+dependency cache, generates the dev certificates, and installs the
+[OMP](https://omp.sh) coding agent (so the container has an agent available;
+`~/.local/bin` is on PATH for login and non-login shells).
 
 The gateway services are profile-gated, so opening the container is fast and
 does not require the sibling repo to build:

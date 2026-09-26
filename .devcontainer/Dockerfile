@@ -27,13 +27,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s /usr/bin/fdfind /usr/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-# rustup-installed toolchains are not on the login PATH, and VS Code
-# terminals run login shells. Restore them for interactive use.
+# rustup-installed toolchains are not on the login PATH, and VS Code terminals
+# run login shells. Restore them for interactive use, plus ~/.local/bin where
+# the OMP installer (post-create.sh) places the agent binary.
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
-    PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:$PATH
-RUN echo 'export PATH="/usr/local/cargo/bin:/usr/local/rustup/bin:$PATH"' \
-        > /etc/profile.d/rust-path.sh
+    PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/home/vscode/.local/bin:$PATH
+RUN printf 'export PATH="/usr/local/cargo/bin:/usr/local/rustup/bin:$HOME/.local/bin:$PATH"\n' \
+        > /etc/profile.d/dev-path.sh
 
 # Pinned toolchain with the components the project lints with, then the
 # developer tooling, installed as root so it lands in the root-owned
