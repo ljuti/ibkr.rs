@@ -821,6 +821,21 @@ pub enum StoreCommand {
 
     /// Show what has been synced and which analyses the stored data supports.
     Status,
+
+    /// Store a report payload from a file (or `-` for stdin) without a gateway.
+    ///
+    /// The file is what `flex report -o json` writes, so an archived statement
+    /// can be analysed offline, and a payload kept from a bug report can be
+    /// reproduced exactly.
+    Import {
+        /// JSON payload written by `flex report -o json`, or `-` for stdin.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Report name to store it under (default: the file's name).
+        #[arg(short = 'r', long, value_name = "NAME")]
+        report: Option<String>,
+    },
 }
 
 impl StoreCommand {
@@ -831,6 +846,7 @@ impl StoreCommand {
             Self::Query { .. } => "store query",
             Self::Schema => "store schema",
             Self::Status => "store status",
+            Self::Import { .. } => "store import",
         }
     }
 }
@@ -1183,6 +1199,27 @@ mod tests {
         // `--report` is what selects a lot; an empty sync is a mistake, not a
         // no-op that silently reports success.
         assert!(Cli::try_parse_from(["ibkr", "store", "sync"]).is_err());
+    }
+
+    #[test]
+    fn store_import_takes_a_file_and_an_optional_name() {
+        let cli = parse(&["ibkr", "store", "import", "report.json"]);
+        match cli.command {
+            Command::Store(StoreCommand::Import { file, report }) => {
+                assert_eq!(file, std::path::Path::new("report.json"));
+                assert!(report.is_none(), "the file name is the default report name");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse(&["ibkr", "store", "import", "-", "--report", "archived_2025"]);
+        match cli.command {
+            Command::Store(StoreCommand::Import { file, report }) => {
+                assert_eq!(file, std::path::Path::new("-"));
+                assert_eq!(report.as_deref(), Some("archived_2025"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

@@ -234,6 +234,51 @@ impl Store {
         sync::upsert(&mut self.connection, report, etag, payload)
     }
 
+    /// Load a report payload from a file and store it.
+    ///
+    /// The file is whatever `flex report -o json` writes (or `-` for stdin), so
+    /// a statement can be analysed without a gateway: an archived window that
+    /// has rolled off, a report fetched on another machine, or a payload kept
+    /// from a bug report. Like a sync, this replaces what that report name
+    /// contributed before, rather than merging two payloads under one name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] when the file is not a Flex report payload
+    /// and [`Error::Io`] when it cannot be read.
+    pub fn import(&mut self, report: &str, path: &Path) -> Result<SyncStats> {
+        let text = if path == Path::new("-") {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)?;
+            buffer
+        } else {
+            fs::read_to_string(path)?
+        };
+        let payload: FlexReportResponse = serde_json::from_str(&text).map_err(|error| {
+            Error::Invalid(format!(
+                "{} is not a Flex report payload (write one with `flex report -o json`): {error}",
+                if path == Path::new("-") {
+                    "stdin".to_owned()
+                } else {
+                    path.display().to_string()
+                }
+            ))
+        })?;
+        self.clear_report(report)?;
+        self.upsert_report(report, None, &payload)
+    }
+
+    /// Forget everything a report contributed, as a sync does before it writes.
+    fn clear_report(&mut self, report: &str) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for table in ["executions", "closed_lots", "cash_transactions"] {
+            transaction.execute(&format!("DELETE FROM {table} WHERE report = ?1"), [report])?;
+        }
+        transaction.execute("DELETE FROM sync_state WHERE report = ?1", [report])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// `ETag` recorded for `report`, if it has ever been synced.
     ///
     /// # Errors
@@ -756,6 +801,79 @@ mod tests {
             }
         );
         assert!(hint.is_none(), "{hint:?}");
+    }
+
+    #[test]
+    fn a_payload_can_be_imported_from_a_file() {
+        let path = temp_store("import");
+        let mut store = Store::open(&path).unwrap();
+
+        // What `flex report -o json` writes: a serialised FlexReportResponse.
+        let payload = payload_with_lots(
+            vec![trade("e1")],
+            vec![{
+                let mut lot = trade("open-1");
+                lot.level_of_detail = Some("CLOSED_LOT".to_owned());
+                lot.open_date_time = Some("20260807;120536".to_owned());
+                lot.trade_date = Some("2026-08-28".to_owned());
+                lot.trade_time = Some("20260828;123310".to_owned());
+                lot
+            }],
+            vec![cash("c1", 42.5)],
+        );
+        let file = path.parent().unwrap().join("report.json");
+        fs::write(&file, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+        let stats = store.import("from-file", &file).unwrap();
+        assert_eq!(stats.executions, 1);
+        assert_eq!(stats.lots, 1);
+        assert_eq!(stats.cash_transactions, 1);
+        assert_eq!(stats.etag, None, "an import has no ETag to remember");
+
+        let rows = store.query("SELECT COUNT(*) FROM round_trips").unwrap();
+        assert_eq!(rows.rows[0][0], Value::Integer(1));
+        let recorded = store
+            .query("SELECT report, executions, lots FROM sync_state")
+            .unwrap();
+        assert_eq!(recorded.rows[0][0], Value::Text("from-file".to_owned()));
+        assert_eq!(recorded.rows[0][2], Value::Integer(1));
+
+        // Importing again replaces that report's rows rather than doubling them.
+        store.import("from-file", &file).unwrap();
+        assert_eq!(
+            store.query("SELECT COUNT(*) FROM executions").unwrap().rows[0][0],
+            Value::Integer(1)
+        );
+
+        // A second import under a different name is a separate report, but the
+        // same execution: rows are keyed by transaction id, so it converges.
+        store.import("other", &file).unwrap();
+        assert_eq!(
+            store.query("SELECT COUNT(*) FROM executions").unwrap().rows[0][0],
+            Value::Integer(1)
+        );
+        assert_eq!(
+            store.query("SELECT COUNT(*) FROM sync_state").unwrap().rows[0][0],
+            Value::Integer(2),
+            "both imports are recorded"
+        );
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn importing_something_that_is_not_a_payload_says_which_file() {
+        let path = temp_store("import-bad");
+        let mut store = Store::open(&path).unwrap();
+        let file = path.parent().unwrap().join("notes.json");
+        fs::write(&file, "{\"hello\": \"world\"}").unwrap();
+
+        let error = store.import("bad", &file).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("notes.json"), "{message}");
+        assert!(message.contains("flex report -o json"), "{message}");
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]

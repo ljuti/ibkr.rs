@@ -20,7 +20,7 @@ to every call.
 | Accounts | `accounts positions`, `accounts summary`, `accounts pnl` | implemented |
 | Orders | `orders place`, `bracket`, `list`, `completed`, `executions`, `cancel` | implemented |
 | Flex | `flex config`, `set-query`, `set-token`, `report` | implemented |
-| Store | `store sync`, `store query`, `store schema` | implemented |
+| Store | `store sync`, `store import`, `store query`, `store schema`, `store status` | implemented |
 | Streaming | `stream bars`, `market-data`, `tick-by-tick`, `orders`, `account-values` | not implemented |
 
 The REST surface is complete: every route the gateway exposes has a typed
@@ -288,11 +288,18 @@ in a single SQLite file so performance can be asked as SQL:
 
 ```bash
 ibkr store sync --report last_365_days --report transactions_30d   # fetch + upsert
+ibkr store import report.json                                     # store a saved payload, no gateway
 ibkr store status                                                 # what is synced, what it can answer
 ibkr store schema                                                 # tables, views, columns
 ibkr store query "SELECT * FROM trade_stats" -o table
 ibkr store query "SELECT * FROM pnl_by_month"
 ```
+
+`store import` takes what `flex report -o json` writes — a file, or `-` for a
+pipe — so a statement can be analysed without a gateway at all: an archived
+window that has rolled off, a report fetched on another machine, or a payload
+kept from a bug report. It replaces that report name's rows, exactly as a sync
+does, and the file's name is the report name unless `--report` says otherwise.
 
 One report failing does not cost the others their sync: a sweep reports each
 report's outcome, keeps the ones that worked, and still exits non-zero. `store

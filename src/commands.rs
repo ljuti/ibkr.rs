@@ -270,10 +270,7 @@ async fn store(
                 match sync_one(&mut store, client, report, refresh).await {
                     Ok(outcome) => {
                         if let SyncOutcome::Synced(stats) = &outcome {
-                            let (_, hint) = crate::store::SyncCapabilities::of(stats);
-                            if let Some(hint) = hint {
-                                output::note(&format!("{report}: {hint}"));
-                            }
+                            note_capability_hint(report, stats);
                         }
                         outcomes.push(outcome);
                     }
@@ -313,10 +310,37 @@ async fn store(
             output::store_schema(&store.schema()?, mode)
         }
 
+        StoreCommand::Import { file, report } => {
+            let mut store = Store::open(&config.db)?;
+            let name = report.unwrap_or_else(|| import_name(&file));
+            output::note(&format!("importing {}", file.display()));
+            let stats = store.import(&name, &file)?;
+            note_capability_hint(&name, &stats);
+            output::store_sync(&[SyncOutcome::Synced(stats)], mode)
+        }
+
         StoreCommand::Status => {
             let store = Store::open_read_only(&config.db)?;
             output::store_status(&store.status()?, mode)
         }
+    }
+}
+
+/// Report name an imported file defaults to: its name, or "imported" for stdin.
+fn import_name(file: &std::path::Path) -> String {
+    file.file_stem()
+        .filter(|stem| !stem.is_empty())
+        .map_or_else(
+            || "imported".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        )
+}
+
+/// Say which Flex sections a report is missing, where the reader can act on it.
+fn note_capability_hint(report: &str, stats: &crate::store::SyncStats) {
+    let (_, hint) = crate::store::SyncCapabilities::of(stats);
+    if let Some(hint) = hint {
+        output::note(&format!("{report}: {hint}"));
     }
 }
 

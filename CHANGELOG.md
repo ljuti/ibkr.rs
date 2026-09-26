@@ -28,6 +28,9 @@ First public release (crate version `0.1.0`).
   `store sync` (idempotent, overlap-safe, ETag-cached, fail-soft across
   reports), `store query` (read-only SQL), `store schema`, and `store status`
   (what is synced, and which analyses the stored rows support).
+- **`store import`**: store a payload written by `flex report -o json` (from a
+  file or stdin) without a gateway — archived windows, payloads from another
+  machine, or one kept from a bug report.
 - **Analysis views**: `pnl_by_symbol`, `pnl_by_month`, `pnl_by_asset_class`,
   `trade_stats`, `cash_by_type`, `open_positions`, `round_trips` — with the
   broker's own realized P/L, and closed-lot rows for exact round trips.
