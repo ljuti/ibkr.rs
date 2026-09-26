@@ -342,6 +342,11 @@ what a sync took minutes to fetch.
 
 ## Development
 
+Contributions are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the house
+rules and where things live. [SECURITY.md](SECURITY.md) covers how to report a
+vulnerability, and is also the honest list of what the client does and does not
+protect (the token is plaintext on disk; `--token` is visible in `ps`).
+
 Host requirements: Rust (the pinned toolchain installs via rustup) and, for the
 gateway/container recipes, Docker. `just` is optional — the recipes are thin
 wrappers over `cargo`.
