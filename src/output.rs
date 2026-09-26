@@ -273,22 +273,17 @@ pub fn symbol_search(results: &[SymbolSearchResponse], mode: RenderMode) -> Resu
     if mode.output == crate::cli::Output::Json {
         return json(&results);
     }
-    let mut table = Table::new(&[
-        "contractId",
-        "symbol",
-        "secType",
-        "exchange",
-        "currency",
-        "localSymbol",
-    ]);
+    // Matching-symbols results carry only id, symbol, security type and
+    // currency — IBKR's `reqMatchingSymbols` has no exchange or local symbol,
+    // so those columns would always be empty here. They stay in the JSON
+    // payload; only the human projection drops them.
+    let mut table = Table::new(&["contractId", "symbol", "secType", "currency"]);
     for result in results {
         table.push(vec![
             result.contract.contract_id.to_string(),
             result.contract.symbol.clone(),
             result.contract.sec_type.clone(),
-            result.contract.exchange.clone(),
             result.contract.currency.clone(),
-            result.contract.local_symbol.clone(),
         ]);
     }
     print_table(&table, mode)
@@ -337,10 +332,15 @@ pub fn positions(envelope: &SnapshotEnvelope<PositionResponse>, mode: RenderMode
         return json(envelope);
     }
     envelope_note(envelope.count, "positions", envelope.truncated);
+    // Option identity matters here: one underlying can hold several contracts
+    // that differ only by expiry/right/strike. Non-options render `-`.
     let mut table = Table::new(&[
         "account",
         "symbol",
         "secType",
+        "expiry",
+        "right",
+        "strike",
         "position",
         "averageCost",
         "currency",
@@ -350,6 +350,14 @@ pub fn positions(envelope: &SnapshotEnvelope<PositionResponse>, mode: RenderMode
             position.account.clone(),
             position.contract.symbol.clone(),
             position.contract.sec_type.clone(),
+            opt_text(
+                position
+                    .contract
+                    .last_trade_date_or_contract_month
+                    .as_deref(),
+            ),
+            opt_text(position.contract.right.as_deref()),
+            opt_number(position.contract.strike),
             number(position.position),
             number(position.average_cost),
             position.contract.currency.clone(),

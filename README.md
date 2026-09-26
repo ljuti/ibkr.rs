@@ -182,14 +182,14 @@ pipe-friendly. `-o table` renders a fixed column projection for humans:
 
 | Command | Columns |
 |---------|---------|
-| `accounts positions` | account, symbol, secType, position, averageCost, currency |
+| `accounts positions` | account, symbol, secType, expiry, right, strike, position, averageCost, currency |
 | `accounts summary` | account, tag, value, currency |
 | `orders list` / `completed` | orderId, symbol, action, totalQuantity, orderType, limitPrice, status, filled, remaining |
 | `orders executions` | time, side, shares, price, commission, currency, executionId |
 | `contracts details` | contractId, symbol, secType, exchange, currency, longName, marketName, minTick |
-| `contracts search` | contractId, symbol, secType, exchange, currency, localSymbol |
+| `contracts search` | contractId, symbol, secType, currency |
 | `market-data historical` | date, open, high, low, close, volume, wap, count |
-| `flex report` | trades and cash transactions, as two tables |
+| `flex report` | trades, closed trades and cash transactions, as three tables |
 
 A table is lossy by design — it shows those columns and nothing else. Anything
 that is not a row (envelope `count`/`truncated`, headings, notes, retry
