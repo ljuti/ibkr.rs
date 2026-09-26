@@ -1,0 +1,78 @@
+# Development stack for the ibkr CLI client.
+#
+#   devcontainer  this workspace (Rust toolchain + docker CLI)  — default
+#   ibkr-gateway  the IBKR gateway, built from ../ibkr-gateway  — profile `gateway`
+#   ib-gateway    headless IB Gateway broker                    — profile `broker`
+#
+# The gateway services are profile-gated: the workspace opens immediately and
+# does not depend on a build of the sibling gateway repo. Start them with
+# `just gateway-up` once the dev certificates exist (post-create generates
+# them).
+#
+# All relative paths resolve against this file's directory (.devcontainer/).
+
+services:
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    init: true
+    volumes:
+      # docker-outside-of-docker: the `docker` CLI here drives the host
+      # daemon, so the profile services below are visible. Root-equivalent on
+      # the host — do not expose this container.
+      - /var/run/docker.sock:/var/run/docker-host.sock
+      - ..:/workspaces/ibkr.rs:cached
+      # Sibling gateway repo: build context for `ibkr-gateway`, and the .env
+      # holding broker credentials for the `ib-gateway` profile.
+      - ../ibkr-gateway:/workspaces/ibkr-gateway:cached
+    environment:
+      # Defaults match the `ibkr-gateway` service and scripts/gen-dev-certs.sh.
+      # Override GATEWAY_API_TOKENS/IBKR_GATEWAY_TOKEN together if you change
+      # the token.
+      IBKR_GATEWAY_URL: ${IBKR_GATEWAY_URL:-https://ibkr-gateway:8080}
+      IBKR_GATEWAY_TOKEN: ${IBKR_GATEWAY_TOKEN:-dev-token-change-me}
+      IBKR_GATEWAY_CA_CERT: /workspaces/ibkr.rs/.certs/ca.pem
+      IBKR_GATEWAY_CLIENT_CERT: /workspaces/ibkr.rs/.certs/client.pem
+      IBKR_GATEWAY_CLIENT_KEY: /workspaces/ibkr.rs/.certs/client-key.pem
+
+  # The gateway itself. Serves mTLS on :8080 using the dev certificates from
+  # this repo; reaches the broker as `ib-gateway:4004` when the broker profile
+  # is running, and stays in reconnect backoff otherwise (so /health reports
+  # `degraded`).
+  ibkr-gateway:
+    profiles: ["gateway"]
+    build:
+      context: ../ibkr-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ../.certs:/certs:ro
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      TLS_CERT_PATH: /certs/server.pem
+      TLS_KEY_PATH: /certs/server-key.pem
+      TLS_CLIENT_CA_PATH: /certs/ca.pem
+      GATEWAY_API_TOKENS: ${GATEWAY_API_TOKENS:-dev-token-change-me}
+      IBKR_HOST: ib-gateway
+      IBKR_PORT: 4004
+      IBKR_CLIENT_ID: 100
+      RUST_LOG: info,ibkr_gateway=debug
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  # Headless IB Gateway (Xvfb + automated login/2FA). Needs real credentials
+  # in ../ibkr-gateway/.env; first boot takes 2-3 minutes.
+  ib-gateway:
+    profiles: ["broker"]
+    image: ghcr.io/code-hustler-ft3d/ibg-controller:v0.7.0
+    restart: unless-stopped
+    # The controller drives a clean logout on SIGTERM; Docker's default 10s
+    # strands an IBKR session slot on every restart.
+    stop_grace_period: 90s
+    env_file: ../ibkr-gateway/.env
+    ports:
+      - "127.0.0.1:4001:4003" # live socket
+      - "127.0.0.1:4002:4004" # paper socket
+      - "127.0.0.1:18081:8080" # controller /health

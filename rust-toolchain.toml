@@ -1,0 +1,7 @@
+# Pinned toolchain — the exact compiler used by the host, the devcontainer
+# image and CI, so all three build with identical output. rustup installs it on
+# demand for host builds; the devcontainer image pre-installs it.
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src", "llvm-tools-preview"]

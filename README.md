@@ -1,0 +1,270 @@
+# ibkr.rs
+
+CLI client for the [IBKR gateway](../ibkr-gateway) — the service that owns the
+single connection to TWS / IB Gateway and exposes it as an authenticated JSON
+API (REST for request/response operations, WebSocket for streaming).
+
+The gateway requires **mutual TLS** (a client certificate signed by its pinned
+CA) **and** a bearer token on every `/api/v1/*` request. This client handles
+both: it presents the client certificate from `.certs/` and attaches the token
+to every call.
+
+## Status
+
+| Area | Commands | State |
+|------|----------|-------|
+| Health | `health` | implemented |
+| Contracts | `contracts details`, `contracts search` | implemented |
+| Market data | `market-data historical` | implemented |
+| Accounts | `accounts positions`, `accounts summary`, `accounts pnl` | implemented |
+| Orders | `orders place`, `bracket`, `list`, `completed`, `executions`, `cancel` | implemented |
+| Flex | `flex config`, `set-query`, `set-token`, `report` | implemented |
+| Streaming | `stream bars`, `market-data`, `tick-by-tick`, `orders`, `account-values` | not implemented |
+
+The REST surface is complete: every route the gateway exposes has a typed
+client method and a CLI command. Streaming is next; those commands are declared
+in `--help` and exit with `error: <command> is not implemented yet`.
+
+### Endpoints
+
+| Command | Route |
+|---------|-------|
+| `health` | `GET /health` |
+| `contracts details` | `POST /api/v1/contracts/details` |
+| `contracts search <PATTERN>` | `GET /api/v1/contracts/search` |
+| `market-data historical` | `POST /api/v1/market-data/historical` |
+| `accounts positions` | `GET /api/v1/accounts/positions` |
+| `accounts summary` | `GET /api/v1/accounts/summary` |
+| `accounts pnl <ACCOUNT>` | `GET /api/v1/accounts/pnl` |
+| `orders place` | `POST /api/v1/orders` |
+| `orders bracket` | `POST /api/v1/orders/bracket` |
+| `orders list` | `GET /api/v1/orders` |
+| `orders completed` | `GET /api/v1/orders/completed` |
+| `orders executions` | `GET /api/v1/orders/executions` |
+| `orders cancel <ORDER_ID>` | `DELETE /api/v1/orders/{orderId}` |
+| `flex config` | `GET /api/v1/config/flex` |
+| `flex set-query <NAME> <ID>` | `PUT /api/v1/config/flex/queries/{reportName}` |
+| `flex set-token <TOKEN>` | `PUT /api/v1/config/flex/token` |
+| `flex report <NAME>` | `GET /api/v1/accounts/reports/{reportName}` |
+
+## Layout
+
+```
+src/
+  main.rs      # binary entry point (thin: delegates to lib::run)
+  lib.rs       # run() -> ExitCode, error reporting with cause chains
+  cli.rs       # clap command tree (mirrors the gateway's surface)
+  commands.rs  # dispatch: CLI -> client calls, order confirmations
+  client.rs    # transport: mutual TLS, bearer auth, retry policy, error decoding
+  api/         # endpoint methods on Client, one module per route area
+  config.rs    # flags + environment + defaults resolution
+  error.rs     # Error / ApiError / ErrorKind
+  output.rs    # JSON and table rendering, column projections
+  types.rs     # wire types (camelCase, timestamps as RFC 3339 strings)
+scripts/
+  gen-dev-certs.sh   # dev CA + server + client certificates
+.devcontainer/       # Rust dev environment (compose form)
+deny.toml            # cargo-deny: licenses, advisories, bans, sources
+justfile             # task runner
+rust-toolchain.toml  # pinned toolchain (1.94.1), shared with CI
+```
+
+## Quick start
+
+The gateway must be running first. Two options.
+
+**A. Gateway in the devcontainer stack** (needs the sibling repo checked out at
+`../ibkr-gateway`):
+
+```bash
+cp .env.example .env
+./scripts/gen-dev-certs.sh     # generates .certs/ (ca, server, client)
+just gateway-up                # builds + starts the gateway from ../ibkr-gateway
+```
+
+`just gateway-up` runs the gateway alone; it stays in reconnect backoff until a
+broker appears, so start it only if you want the HTTP API surface. To add the
+headless IB Gateway (real credentials required in `../ibkr-gateway/.env`):
+
+```bash
+just broker-up                 # gateway + headless IB Gateway, first boot ~2-3 min
+```
+
+**B. Gateway already running elsewhere** (for example on the host, or in the
+gateway repo's own devcontainer):
+
+```bash
+export IBKR_GATEWAY_URL=https://127.0.0.1:8080
+export IBKR_GATEWAY_TOKEN=<token>
+export IBKR_GATEWAY_CA_CERT=/path/to/ca.pem
+export IBKR_GATEWAY_CLIENT_CERT=/path/to/client.pem
+export IBKR_GATEWAY_CLIENT_KEY=/path/to/client-key.pem
+```
+
+Then:
+
+```bash
+cargo run -- health
+cargo run -- health -o table
+```
+
+`health` is the one endpoint the gateway serves without a bearer token, so it
+isolates transport problems: a TLS error means the certificates are wrong, and
+any other failure is the network. A 401 on an `/api/v1/*` request means the
+token is wrong.
+
+## Configuration
+
+Precedence is flag → environment → default. Certificate defaults
+(`.certs/ca.pem`, `.certs/client.pem`, `.certs/client-key.pem`) apply only when
+those files exist, so the client works outside this repository without extra
+config.
+
+| Flag | Environment variable | Default |
+|------|----------------------|---------|
+| `-u, --url` | `IBKR_GATEWAY_URL` | `https://127.0.0.1:8080` |
+| `-t, --token` | `IBKR_GATEWAY_TOKEN` | — |
+| `--ca-cert` | `IBKR_GATEWAY_CA_CERT` | `.certs/ca.pem` |
+| `--client-cert` | `IBKR_GATEWAY_CLIENT_CERT` | `.certs/client.pem` |
+| `--client-key` | `IBKR_GATEWAY_CLIENT_KEY` | `.certs/client-key.pem` |
+| `--timeout` | `IBKR_GATEWAY_TIMEOUT_SEC` | `60` |
+| `--max-retries` | `IBKR_GATEWAY_MAX_RETRIES` | `3` |
+| `--tls-skip-verify` | `IBKR_GATEWAY_TLS_SKIP_VERIFY` | `false` |
+| `-o, --output` | — | `json` |
+
+Errors are mapped onto the gateway's machine-readable `kind` values in
+`src/error.rs`; `ErrorKind::RateLimited` carries the gateway's `Retry-After`.
+
+### Order confirmation
+
+`orders place`, `orders bracket` and `orders cancel` print the resolved intent
+to stderr and ask before sending. `--yes` (or `-y`) skips the prompt; without it
+a non-interactive stdin is **refused** rather than treated as consent, so an
+unattended script cannot place an order by accident:
+
+```bash
+ibkr orders place -s AAPL --side BUY --quantity 100 --type LIMIT --limit-price 210
+# about to place order:
+# field        value
+# instrument   AAPL (STK)
+# side         BUY
+# ...
+# confirm? [y/N]
+
+ibkr orders place ... --yes          # scripts: explicit, no prompt
+```
+
+Arguments are validated locally first (a `LIMIT` without `--limit-price`, a
+non-positive quantity, or bracket targets on the wrong side of the entry all
+fail before anything is sent).
+
+Order placement sends an `Idempotency-Key`: either `--idempotency-key` or a
+generated UUID, which is printed to stderr. Re-using that key with the same
+body replays the original result instead of placing a second order — that is
+what makes a retry after a timeout safe.
+
+### Retries
+
+The gateway enforces IBKR pacing itself and answers `429` with a `Retry-After`
+hint. Read requests (`GET`) are retried against that hint, up to
+`--max-retries`; each retry is reported on **stderr** so stdout stays
+parseable. A hint longer than 60 seconds is not slept out — the error reaches
+you instead of the command appearing to hang.
+
+Mutations (`POST`, `PUT`, `DELETE`) are sent **exactly once**, whatever the
+status: retrying an order could duplicate it. `--max-retries 0` disables
+retrying reads too.
+
+### Output modes
+
+`-o json` (default) prints the gateway's payload as-is — complete and
+pipe-friendly. `-o table` renders a fixed column projection for humans:
+
+| Command | Columns |
+|---------|---------|
+| `accounts positions` | account, symbol, secType, position, averageCost, currency |
+| `accounts summary` | account, tag, value, currency |
+| `orders list` / `completed` | orderId, symbol, action, totalQuantity, orderType, limitPrice, status, filled, remaining |
+| `orders executions` | time, side, shares, price, commission, currency, executionId |
+| `contracts details` | contractId, symbol, secType, exchange, currency, longName, marketName, minTick |
+| `contracts search` | contractId, symbol, secType, exchange, currency, localSymbol |
+| `market-data historical` | date, open, high, low, close, volume, wap, count |
+| `flex report` | trades and cash transactions, as two tables |
+
+A table is lossy by design — it shows those columns and nothing else. Anything
+that is not a row (envelope `count`/`truncated`, headings, notes, retry
+warnings, confirmation prompts) goes to **stderr**, so `stdout` stays a clean
+stream of rows or JSON. Columns shrink to fit the terminal, marking elision
+with `…`; `--no-truncate` keeps natural width.
+
+### Flex reports
+
+The Flex Web Service accepts no date-range override, so each report's window is
+fixed by its query's Period setting — the envelope's `fromDate`/`toDate` are
+authoritative. Responses carry an `ETag`; the CLI prints it to stderr, and
+`--etag <TAG>` sends it back as `If-None-Match`:
+
+```bash
+ibkr flex report transactions_30d              # -> etag "abc123"
+ibkr flex report transactions_30d --etag '"abc123"'   # -> not modified
+ibkr flex report transactions_30d --refresh    # bypass the gateway cache
+```
+
+## Development
+
+Host requirements: Rust (the pinned toolchain installs via rustup) and, for the
+gateway/container recipes, Docker. `just` is optional — the recipes are thin
+wrappers over `cargo`.
+
+```bash
+cargo build
+cargo run -- health
+just ci            # fmt-check + clippy + test
+just deny          # license/advisory/ban check (needs cargo-deny)
+```
+
+Cargo aliases are defined in `.cargo/config.toml`: `cargo c` (check),
+`cargo t` (test), `cargo lint` (clippy, warnings as errors).
+
+### Devcontainer
+
+`.devcontainer/` is a compose-form devcontainer: the workspace container builds
+from `rust:1.94-bookworm` with clippy, rustfmt, `cargo-nextest`, `cargo-deny`
+and `cargo-machete` preinstalled. `post-create.sh` loads `.env`, warms the
+dependency cache, and generates the dev certificates.
+
+The gateway services are profile-gated, so opening the container is fast and
+does not require the sibling repo to build:
+
+| Profile | Service | Purpose |
+|---------|---------|---------|
+| `gateway` | `ibkr-gateway` | the gateway, built from `../ibkr-gateway` |
+| `broker` | `ib-gateway` | headless IB Gateway (Xvfb + automated login/2FA) |
+
+Inside the container the gateway is reached as `https://ibkr-gateway:8080`
+(compose service name) using `/workspaces/ibkr.rs/.certs`. Note that the
+devcontainer mounts the host Docker socket, which is root-equivalent on the
+host — do not expose the container.
+
+## Test coverage
+
+`cargo test` covers:
+
+* **Configuration** — flag/environment/default precedence, the all-or-nothing
+  client keypair rule, certificate path resolution, truthiness parsing.
+* **Transport** — the retry decision (pacing-only, missing hint, over-cap hint,
+  exactly-at-cap) and error-kind mapping/rendering.
+* **Wire types** — every documented payload shape (`/health`, contract details,
+  symbol search, historical bars, positions, summary, PnL, orders, executions,
+  cancel, Flex reports and config), enum spellings (`BUY`, `STOP_LIMIT`, `GTC`,
+  `C`/`P`), camelCase field names, and omission of unset optionals.
+* **Request validation** — order price requirements, bracket targets around the
+  entry, positive quantities.
+* **CLI surface** — parsed command forms, global flags before and after the
+  subcommand, mutation classification, instrument descriptions, and a
+  regression test for a positional silently shadowing the global `--token`.
+* **Rendering** — column alignment, terminal-width shrinking with elision,
+  number formatting, absent-value handling.
+
+Endpoint behaviour is verified against a running gateway; there is no in-repo
+gateway fixture yet.

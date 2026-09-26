@@ -1,0 +1,9 @@
+/target
+/.certs
+/.env
+/.env.local
+
+# Local tool/editor state
+.idea/
+.DS_Store
+*.swp
