@@ -192,7 +192,7 @@ pipe-friendly. `-o table` renders a fixed column projection for humans:
 | `contracts details` | contractId, symbol, secType, exchange, currency, longName, marketName, minTick |
 | `contracts search` | contractId, symbol, secType, currency |
 | `market-data historical` | date, open, high, low, close, volume, wap, count |
-| `flex report` | trades, closed trades and cash transactions, as three tables |
+| `flex report` | trades, closed lots (or closed trades), and cash transactions |
 
 A table is lossy by design — it shows those columns and nothing else. Anything
 that is not a row (envelope `count`/`truncated`, headings, notes, retry
@@ -213,25 +213,25 @@ ibkr flex report transactions_30d --etag '"abc123"'   # -> not modified
 ibkr flex report transactions_30d --refresh    # bypass the gateway cache
 ```
 
-The `table` mode prints three projections: every execution, the subset that
-closes a position, and the cash side. The closed-trades table is the round-trip
-view — `closed`, `opened`, `symbol`, `expiry`, `right`, `strike`, `quantity`,
-`pnl`, `currency` — where `opened` is the Flex `openDateTime` of the position
-being closed (date part only, compact `YYYYMMDD` normalized to ISO) and `pnl`
-the statement's realized FIFO P/L. Rows are selected by the statement's
-open/close indicator (`C`, or `C;O` for a close-and-reopen); an absent or blank
-indicator falls back to a non-zero realized P/L, and the `Unknown` sentinel
-`ib-flex` emits for blank enum attributes is treated as absence
-([ibkr-gateway#5](https://github.com/ljuti/ibkr-gateway/issues/5)).
+The `table` mode prints three projections: every execution, the round trips,
+and the cash side. The round-trip table — `closed`, `opened`, `symbol`,
+`expiry`, `right`, `strike`, `quantity`, `cost`, `pnl`, `currency` — comes from
+the statement's **closed lots** when the query asks for lot-level detail: Flex
+keys a lot by its *opening* execution and carries the close, the matched
+quantity, the cost basis and the realized P/L on the row, which is the exact
+answer to "when was this opened, when was it closed, what did it realize?".
+Without lots it falls back to closing executions, where `opened` is `-`
+whenever IBKR leaves `openDateTime` empty at execution level (observed on all
+4,848 executions of a real 365-day statement).
 
-`opened` is `-` whenever IBKR leaves `openDateTime` empty at execution level —
-observed on all 4,848 executions of a real 365-day statement, where the open
-dates instead sit on the `CLOSED_LOT` rows that the gateway does not map yet
-([ibkr-gateway#6](https://github.com/ljuti/ibkr-gateway/issues/6)). The
-remaining trades detail — open date, level, taxes, net cash, mark-to-market
-P/L, multiplier, option identity, order/exec ids — is in the JSON payload,
-which does include the gateway's contract request tracked in
-[ibkr-gateway#3](https://github.com/ljuti/ibkr-gateway/issues/3).
+`trades` and `lots` are separate arrays in the payload and stay separate
+everywhere: a lot and its execution both carry `fifoPnlRealized`, so summing
+them double counts
+([ibkr-gateway#6](https://github.com/ljuti/ibkr-gateway/issues/6)). Rows are
+selected by the statement's open/close indicator (`C`, or `C;O` for a
+close-and-reopen); an absent or blank indicator falls back to a non-zero
+realized P/L, and blank enum attributes arrive as `null`
+([ibkr-gateway#5](https://github.com/ljuti/ibkr-gateway/issues/5)).
 
 ### Local trade store
 
@@ -250,11 +250,11 @@ ibkr store query "SELECT * FROM pnl_by_month"
 id, so re-syncing, re-fetching a corrected statement, or syncing overlapping
 reports (the 30-day and 365-day windows share executions) all leave one row per
 execution. Each report's ETag is stored, so a re-sync the gateway answers with
-`304` ingests nothing. Rows are split by level of detail — executions, closed
-lots (`round_trips`, empty until the gateway exposes them) and aggregates —
-because Flex mixes levels in one array and summing across them double counts.
-Cash transactions get the same treatment: only `DETAIL` rows are stored, since
-`SUMMARY` rows aggregate the same money per report date.
+`304` ingests nothing. Executions and closed lots are kept in separate tables
+(`round_trips` reads the lots) because Flex mixes levels of detail and summing
+across them double counts — `ORDER`/`SYMBOL_SUMMARY`/`ASSET_SUMMARY` rows are
+counted and dropped. Cash is partitioned the same way: only `DETAIL` rows are
+stored, since `SUMMARY` rows aggregate the same money per report date.
 
 Views answer the usual questions with the broker's own numbers:
 
@@ -264,7 +264,7 @@ Views answer the usual questions with the broker's own numbers:
 | `trade_stats` | closes, wins, losses, flat, realized P/L, average win/loss |
 | `cash_by_type` | dividends, withholding, fees, interest, transfers |
 | `open_positions` | net position per contract, derived from executions |
-| `round_trips` | opening execution ↔ close, quantity, cost basis, realized P/L |
+| `round_trips` | opening execution ↔ close, quantity, cost basis, realized P/L (from the statement's closed lots) |
 
 `realized_pnl` is the broker's figure for a closing execution, not something
 recomputed here: pairing executions ourselves reproduces the broker's open
@@ -281,9 +281,8 @@ of history and can look open when the broker holds nothing. Measured against
 positions never appear (transferred in, or opened before the window). Treat the
 view as a reconciliation aid — `accounts positions` is the authority.
 
-Cash rows carry no date until
-[ljuti/ibkr-gateway#7](https://github.com/ljuti/ibkr-gateway/issues/7) lands, so
-`cash_by_type` is a total per type, not a time series.
+Cash rows carry the statement's event date, so `cash_by_type` totals per type
+and grouping by month is one query away.
 
 The file is ordinary SQLite: `sqlite3`, DuckDB, pandas and Metabase can all
 read it. `store query` opens it read-only, so a stray statement cannot damage
@@ -344,9 +343,11 @@ host — do not expose the container.
 * **CLI surface** — parsed command forms, global flags before and after the
   subcommand, mutation classification, instrument descriptions, and a
   regression test for a positional silently shadowing the global `--token`.
-* **Store** — schema application and versioning, idempotent/overlapping syncs,
-  level-of-detail partitioning (executions vs lots vs aggregates, cash detail
-  vs summary), ETag state, read-only queries, and the analysis views.
+* **Store** — schema application and versioning (including stepping an older
+  file up and forcing the re-sync that rebuilds it), idempotent/overlapping
+  syncs, level-of-detail partitioning (executions vs lots vs aggregates, cash
+  detail vs summary), lot keys for rows Flex cannot key itself, ETag state,
+  read-only queries, and the analysis views.
 * **Rendering** — column alignment, terminal-width shrinking with elision,
   number formatting, absent-value handling, Flex close detection, enum-sentinel
   handling and the date-time projection.

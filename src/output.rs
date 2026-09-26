@@ -582,18 +582,26 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
             }
             print_table(&trades, mode)?;
 
-            // Closing executions are the only rows that answer "when was this
-            // opened, when was it closed, what did it realize?" — an opening
-            // row has no realized P/L and no open date to show.
-            let closed: Vec<&Trade> = value
-                .trades
-                .iter()
-                .filter(|trade| closes_position(trade))
-                .collect();
-            note(&format!("closed trades ({} rows)", closed.len()));
+            // Round trips: closed lots are the exact pairing — opening
+            // execution, close, matched quantity, cost basis, realized P/L.
+            // Without them, closing executions are the best available source:
+            // they carry the realized figure but rarely an open date.
+            let (label, closed): (&str, Vec<&Trade>) = if value.lots.is_empty() {
+                (
+                    "closed trades",
+                    value
+                        .trades
+                        .iter()
+                        .filter(|trade| closes_position(trade))
+                        .collect(),
+                )
+            } else {
+                ("closed lots", value.lots.iter().collect())
+            };
+            note(&format!("{label} ({} rows)", closed.len()));
             let mut realized = Table::new(&[
-                "closed", "opened", "symbol", "expiry", "right", "strike", "quantity", "pnl",
-                "currency",
+                "closed", "opened", "symbol", "expiry", "right", "strike", "quantity", "cost",
+                "pnl", "currency",
             ]);
             for trade in closed {
                 realized.push(vec![
@@ -604,6 +612,7 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
                     enum_text(trade.put_call.as_deref()),
                     opt_number(trade.strike),
                     opt_number(trade.quantity),
+                    opt_number(trade.cost),
                     opt_number(trade.fifo_pnl_realized),
                     opt_text(trade.currency.as_deref()),
                 ]);

@@ -86,7 +86,6 @@ impl Store {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(path)?;
-        connection.execute_batch(schema::DDL)?;
         let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > schema::SCHEMA_VERSION {
             return Err(Error::Store(format!(
@@ -95,8 +94,18 @@ impl Store {
                 schema::SCHEMA_VERSION
             )));
         }
-        if version < schema::SCHEMA_VERSION {
-            // The DDL is additive, so applying it *is* the migration.
+        // A fresh file has nothing to carry forward; an existing one is stepped
+        // up before the current DDL recreates whatever the migration dropped.
+        if version > 0 && version < schema::SCHEMA_VERSION {
+            for (_, sql) in schema::MIGRATIONS
+                .iter()
+                .filter(|(target, _)| *target > version)
+            {
+                connection.execute_batch(sql)?;
+            }
+        }
+        connection.execute_batch(schema::DDL)?;
+        if version != schema::SCHEMA_VERSION {
             connection
                 .execute_batch(&format!("PRAGMA user_version = {}", schema::SCHEMA_VERSION))?;
         }
@@ -260,11 +269,20 @@ mod tests {
     }
 
     fn payload(trades: Vec<Trade>, cash: Vec<CashTransaction>) -> FlexReportResponse {
+        payload_with_lots(trades, Vec::new(), cash)
+    }
+
+    fn payload_with_lots(
+        trades: Vec<Trade>,
+        lots: Vec<Trade>,
+        cash: Vec<CashTransaction>,
+    ) -> FlexReportResponse {
         FlexReportResponse {
             account_id: Some("U1".to_owned()),
             from_date: Some("2026-03-01".to_owned()),
             to_date: Some("2026-03-31".to_owned()),
             trades,
+            lots,
             cash_transactions: cash,
         }
     }
@@ -463,6 +481,48 @@ mod tests {
             version.rows[0][0],
             Value::Integer(i64::from(SCHEMA_VERSION))
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn an_older_store_is_stepped_up_and_asks_to_be_resynced() {
+        let path = temp_store("migration");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store
+                .upsert_report("r", Some("\"e\""), &payload(vec![trade("t1")], Vec::new()))
+                .unwrap();
+            // As if the file had been written by the previous schema, whose
+            // closed-lot key could not represent every delivered lot.
+            store.query("PRAGMA user_version = 1").unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let version = store.query("PRAGMA user_version").unwrap();
+        assert_eq!(
+            version.rows[0][0],
+            Value::Integer(i64::from(SCHEMA_VERSION))
+        );
+        // Derived lots are dropped, and the reports that produced them are
+        // marked for re-fetch rather than left answering 304.
+        assert_eq!(
+            store
+                .query("SELECT COUNT(*) FROM round_trips")
+                .unwrap()
+                .rows[0][0],
+            Value::Integer(0)
+        );
+        assert_eq!(
+            store.query("SELECT COUNT(*) FROM sync_state").unwrap().rows[0][0],
+            Value::Integer(0),
+            "a migration must force a re-sync instead of trusting stale ETags"
+        );
+        // Executions survive: their key never changed.
+        assert_eq!(
+            store.query("SELECT COUNT(*) FROM executions").unwrap().rows[0][0],
+            Value::Integer(1)
+        );
+        drop(store);
         cleanup(&path);
     }
 

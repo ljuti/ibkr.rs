@@ -795,6 +795,12 @@ pub struct FlexReportResponse {
     pub to_date: Option<String>,
     /// Executed trades.
     pub trades: Vec<Trade>,
+    /// Closed-lot rows (`levelOfDetail` `CLOSED_LOT`), when the query asks for
+    /// lot-level detail. Deliberately separate from [`Self::trades`]: a lot and
+    /// its execution both carry `fifoPnlRealized`, so summing the two arrays
+    /// double counts. Absent on gateways that do not map them yet.
+    #[serde(default)]
+    pub lots: Vec<Trade>,
     /// Cash transactions.
     pub cash_transactions: Vec<CashTransaction>,
 }

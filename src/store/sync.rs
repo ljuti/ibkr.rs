@@ -1,5 +1,7 @@
 //! Upserting one fetched Flex report into the store.
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, named_params};
 use serde::Serialize;
 
@@ -69,11 +71,11 @@ const EXECUTION_INSERT: &str = "
 
 const LOT_INSERT: &str = "
     INSERT OR REPLACE INTO closed_lots (
-        open_transaction_id, close_time, close_date, conid, symbol, description, asset_category,
-        currency, buy_sell, quantity, cost, realized_pnl, multiplier, open_time, open_date,
-        report, synced_at
+        lot_key, open_transaction_id, close_time, close_date, conid, symbol, description,
+        asset_category, currency, buy_sell, quantity, cost, realized_pnl, multiplier, open_time,
+        open_date, report, synced_at
     ) VALUES (
-        :open_transaction_id, :close_time, :close_date, :conid, :symbol, :description,
+        :lot_key, :open_transaction_id, :close_time, :close_date, :conid, :symbol, :description,
         :asset_category, :currency, :buy_sell, :quantity, :cost, :realized_pnl, :multiplier,
         :open_time, :open_date, :report, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
     )";
@@ -134,11 +136,86 @@ pub(super) fn upsert(
     };
 
     let transaction = connection.transaction()?;
+    // A sync replaces whatever that report contributed before: rows a
+    // regenerated statement no longer contains would otherwise linger and be
+    // counted twice. Rows another report also contributed stay until their own
+    // report is synced.
+    for table in ["executions", "closed_lots", "cash_transactions"] {
+        transaction.execute(&format!("DELETE FROM {table} WHERE report = ?1"), [report])?;
+    }
     insert_trades(&transaction, report, payload, &mut stats)?;
+    insert_lots(&transaction, report, &payload.lots, &mut stats)?;
     insert_cash(&transaction, report, payload, &mut stats)?;
     record_sync_state(&transaction, &stats)?;
     transaction.commit()?;
     Ok(stats)
+}
+
+/// Closed-lot rows, which the gateway returns in their own array precisely so
+/// that they are not summed with the executions they belong to.
+fn insert_lots(
+    transaction: &rusqlite::Transaction<'_>,
+    report: &str,
+    lots: &[Trade],
+    stats: &mut SyncStats,
+) -> Result<()> {
+    let mut lot_insert = transaction.prepare(LOT_INSERT)?;
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    for trade in lots {
+        let Some(open_transaction_id) = trade
+            .transaction_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            stats.skipped += 1;
+            continue;
+        };
+        let content = lot_content(trade);
+        let ordinal = seen.entry(content.clone()).or_insert(0);
+        *ordinal += 1;
+        lot_insert.execute(named_params! {
+            ":lot_key": format!("{content}#{ordinal}"),
+            ":open_transaction_id": open_transaction_id,
+            ":close_time": trade.trade_time.as_deref().unwrap_or(""),
+            ":close_date": as_date(trade.trade_date.as_deref()),
+            ":conid": trade.conid,
+            ":symbol": trade.symbol,
+            ":description": trade.description,
+            ":asset_category": trade.asset_category,
+            ":currency": trade.currency,
+            ":buy_sell": trade.buy_sell,
+            ":quantity": trade.quantity,
+            ":cost": trade.cost,
+            ":realized_pnl": trade.fifo_pnl_realized,
+            ":multiplier": trade.multiplier,
+            ":open_time": trade.open_date_time,
+            ":open_date": as_date(trade.open_date_time.as_deref()),
+            ":report": report,
+        })?;
+        stats.lots += 1;
+    }
+    Ok(())
+}
+
+/// A lot's content, which together with its ordinal forms `lot_key`.
+///
+/// Two lots can be byte-identical — each belongs to a different closing
+/// execution — so content alone would collapse them and lose the second one's
+/// realized P/L.
+fn lot_content(trade: &Trade) -> String {
+    format!(
+        "{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        trade.transaction_id.as_deref().unwrap_or(""),
+        trade.trade_time.as_deref().unwrap_or(""),
+        trade.conid.as_deref().unwrap_or(""),
+        trade.quantity,
+        trade.cost,
+        trade.fifo_pnl_realized,
+        trade.open_date_time.as_deref(),
+        trade.buy_sell.as_deref(),
+        trade.trade_date.as_deref(),
+    )
 }
 
 /// Executions and closed lots, split by level of detail.
@@ -351,11 +428,20 @@ mod tests {
     }
 
     fn empty_payload(trades: Vec<Trade>, cash: Vec<CashTransaction>) -> FlexReportResponse {
+        payload_with_lots(trades, Vec::new(), cash)
+    }
+
+    fn payload_with_lots(
+        trades: Vec<Trade>,
+        lots: Vec<Trade>,
+        cash: Vec<CashTransaction>,
+    ) -> FlexReportResponse {
         FlexReportResponse {
             account_id: Some("U1".to_owned()),
             from_date: Some("2026-03-01".to_owned()),
             to_date: Some("2026-03-31".to_owned()),
             trades,
+            lots,
             cash_transactions: cash,
         }
     }
@@ -510,6 +596,156 @@ mod tests {
             Level::Aggregate
         );
         assert_eq!(classify(&trade("t", Some("ORDER"))), Level::Aggregate);
+    }
+
+    #[test]
+    fn lots_arriving_in_their_own_array_become_round_trips() {
+        let path = temp_store("lots-array");
+        let mut store = Store::open(&path).unwrap();
+        // The gateway's shape: executions in `trades`, closed lots in `lots`,
+        // the same money recorded in both — only the lots may be summed.
+        let mut execution = trade("close-exec", Some("EXECUTION"));
+        execution.open_close = Some("C".to_owned());
+        execution.fifo_pnl_realized = Some(92.825);
+        let mut lot = trade("open-exec", Some("CLOSED_LOT"));
+        lot.open_date_time = Some("20260807;120536".to_owned());
+        lot.trade_time = Some("20260828;123310".to_owned());
+        lot.trade_date = Some("2026-08-28".to_owned());
+        lot.quantity = Some(500.0);
+        lot.cost = Some(155.85);
+        lot.fifo_pnl_realized = Some(92.825);
+
+        let stats = store
+            .upsert_report(
+                "r",
+                None,
+                &payload_with_lots(vec![execution], vec![lot], Vec::new()),
+            )
+            .unwrap();
+        assert_eq!(stats.executions, 1);
+        assert_eq!(stats.lots, 1);
+
+        let trips = store
+            .query("SELECT open_transaction_id, open_date, close_date, quantity, cost, realized_pnl FROM round_trips")
+            .unwrap();
+        assert_eq!(
+            trips.rows[0][0],
+            rusqlite::types::Value::Text("open-exec".to_owned())
+        );
+        assert_eq!(
+            trips.rows[0][1],
+            rusqlite::types::Value::Text("2026-08-07".to_owned())
+        );
+        assert_eq!(
+            trips.rows[0][2],
+            rusqlite::types::Value::Text("2026-08-28".to_owned())
+        );
+        assert_eq!(trips.rows[0][4], rusqlite::types::Value::Real(155.85));
+        assert_eq!(trips.rows[0][5], rusqlite::types::Value::Real(92.825));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn identical_lots_belong_to_different_closes_and_are_all_kept() {
+        let path = temp_store("identical-lots");
+        let mut store = Store::open(&path).unwrap();
+        // Real shape: one order fills in five executions, and two of them close
+        // the same quantity of the same opened lot — byte-identical lot rows.
+        let mut first = trade("open-exec", Some("CLOSED_LOT"));
+        first.trade_date = Some("2026-07-06".to_owned());
+        first.trade_time = Some("20260706;145105".to_owned());
+        first.quantity = Some(500.0);
+        first.cost = Some(238.7625);
+        first.fifo_pnl_realized = Some(22.375);
+        let twin = first.clone();
+
+        let stats = store
+            .upsert_report(
+                "r",
+                None,
+                &payload_with_lots(Vec::new(), vec![first, twin], Vec::new()),
+            )
+            .unwrap();
+        assert_eq!(
+            stats.lots, 2,
+            "an identical twin is a second lot, not a duplicate key"
+        );
+
+        let rows = store
+            .query("SELECT COUNT(*), ROUND(SUM(realized_pnl), 4) FROM round_trips")
+            .unwrap();
+        assert_eq!(rows.rows[0][0], rusqlite::types::Value::Integer(2));
+        assert_eq!(rows.rows[0][1], rusqlite::types::Value::Real(44.75));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn resyncing_a_report_replaces_its_lots_instead_of_accumulating() {
+        let path = temp_store("replace-lots");
+        let mut store = Store::open(&path).unwrap();
+        let mut lot = trade("open-exec", Some("CLOSED_LOT"));
+        lot.trade_time = Some("20260706;145105".to_owned());
+        lot.quantity = Some(100.0);
+        store
+            .upsert_report(
+                "r",
+                None,
+                &payload_with_lots(Vec::new(), vec![lot.clone()], Vec::new()),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .query("SELECT COUNT(*) FROM round_trips")
+                .unwrap()
+                .rows[0][0],
+            rusqlite::types::Value::Integer(1)
+        );
+
+        // The statement is regenerated with a different close: the old row is
+        // gone rather than lingering beside the new one.
+        let mut corrected = lot.clone();
+        corrected.trade_time = Some("20260707;093000".to_owned());
+        corrected.trade_date = Some("2026-07-07".to_owned());
+        store
+            .upsert_report(
+                "r",
+                None,
+                &payload_with_lots(Vec::new(), vec![corrected], Vec::new()),
+            )
+            .unwrap();
+        let rows = store
+            .query("SELECT COUNT(*), MAX(close_date) FROM round_trips")
+            .unwrap();
+        assert_eq!(rows.rows[0][0], rusqlite::types::Value::Integer(1));
+        assert_eq!(
+            rows.rows[0][1],
+            rusqlite::types::Value::Text("2026-07-07".to_owned())
+        );
+
+        // Another report's lots are untouched by this report's re-sync.
+        store
+            .upsert_report(
+                "other",
+                None,
+                &payload_with_lots(Vec::new(), vec![lot], Vec::new()),
+            )
+            .unwrap();
+        store
+            .upsert_report(
+                "r",
+                None,
+                &payload_with_lots(Vec::new(), Vec::new(), Vec::new()),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .query("SELECT COUNT(*) FROM round_trips")
+                .unwrap()
+                .rows[0][0],
+            rusqlite::types::Value::Integer(1),
+            "the other report's lot must survive"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
