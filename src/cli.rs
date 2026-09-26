@@ -84,6 +84,10 @@ pub struct GlobalArgs {
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
 
+    /// Refuse order mutations locally (env: `IBKR_READ_ONLY`).
+    #[arg(long, global = true)]
+    pub read_only: bool,
+
     /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t = Output::Json, global = true)]
     pub output: Output,
@@ -107,6 +111,7 @@ impl GlobalArgs {
             tls_skip_verify: self.tls_skip_verify.then_some(true),
             db: self.db.clone(),
             config: self.config.clone(),
+            read_only: self.read_only.then_some(true),
         }
     }
 
@@ -1178,6 +1183,29 @@ mod tests {
         // `--report` is what selects a lot; an empty sync is a mistake, not a
         // no-op that silently reports success.
         assert!(Cli::try_parse_from(["ibkr", "store", "sync"]).is_err());
+    }
+
+    #[test]
+    fn read_only_is_a_global_switch() {
+        let cli = parse(&[
+            "ibkr",
+            "orders",
+            "place",
+            "-s",
+            "AAPL",
+            "--side",
+            "BUY",
+            "--quantity",
+            "1",
+            "--type",
+            "MARKET",
+            "--read-only",
+        ]);
+        assert_eq!(cli.global.overrides().read_only, Some(true));
+        let cli = parse(&["ibkr", "--read-only", "orders", "cancel", "1"]);
+        assert_eq!(cli.global.overrides().read_only, Some(true));
+        let cli = parse(&["ibkr", "health"]);
+        assert_eq!(cli.global.overrides().read_only, None);
     }
 
     #[test]

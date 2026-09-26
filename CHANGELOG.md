@@ -21,6 +21,9 @@ First public release (crate version `0.1.0`).
   connection. `configure --show` prints the effective settings, the layer each
   value came from and the file in use. Resolution is
   flag → environment → config file → default, so an exported `.env` is optional.
+- **Read-only mode**: `--read-only` / `IBKR_READ_ONLY` / `read-only` in the
+  config file refuse `orders place`, `orders bracket` and `orders cancel` before
+  validation and before anything is sent.
 - **`store`**: Flex statements in a local `SQLite` file —
   `store sync` (idempotent, overlap-safe, ETag-cached, fail-soft across
   reports), `store query` (read-only SQL), `store schema`, and `store status`

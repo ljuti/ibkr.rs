@@ -42,6 +42,10 @@ are looked at first.
   machine. Prefer the config file or the environment variable.
 - **`--tls-skip-verify` disables certificate verification.** Development only:
   it makes the connection interceptable.
+- **Read-only mode refuses order mutations locally** (`--read-only`,
+  `IBKR_READ_ONLY`, or the config file's `read-only`). It is a guard rail, not a
+  boundary: a client can be rebuilt without it, so the gateway's own
+  `GATEWAY_READ_ONLY` remains the authority.
 - **Mutations are not retried.** Order placement and cancellation are sent
   exactly once, whatever the status, and prompt for confirmation unless `--yes`
   is given.

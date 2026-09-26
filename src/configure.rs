@@ -27,6 +27,7 @@ struct Answers {
     timeout: Option<String>,
     max_retries: Option<String>,
     tls_skip_verify: Option<String>,
+    read_only: Option<String>,
     db: Option<String>,
 }
 
@@ -57,6 +58,9 @@ impl Answers {
         if let Some(value) = self.tls_skip_verify {
             file.tls_skip_verify = Some(is_truthy(&value));
         }
+        if let Some(value) = self.read_only {
+            file.read_only = Some(is_truthy(&value));
+        }
         if let Some(value) = self.db {
             file.db = Some(PathBuf::from(value));
         }
@@ -73,6 +77,7 @@ impl Answers {
             timeout: overrides.timeout.map(|value| value.as_secs().to_string()),
             max_retries: overrides.max_retries.map(|value| value.to_string()),
             tls_skip_verify: overrides.tls_skip_verify.map(|value| value.to_string()),
+            read_only: overrides.read_only.map(|value| value.to_string()),
             db: overrides.db.clone().map(|path| display(&path)),
         }
     }
@@ -86,6 +91,7 @@ impl Answers {
             && self.timeout.is_none()
             && self.max_retries.is_none()
             && self.tls_skip_verify.is_none()
+            && self.read_only.is_none()
             && self.db.is_none()
     }
 }
@@ -205,6 +211,12 @@ impl Answers {
                 &config.tls_skip_verify.to_string(),
                 config,
                 "tls-skip-verify",
+            ))?,
+            read_only: ask(&Prompt::new(
+                "read-only (refuse order mutations)",
+                &config.read_only.to_string(),
+                config,
+                "read-only",
             ))?,
             db: ask(&Prompt::new(
                 "store database",

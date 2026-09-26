@@ -165,6 +165,7 @@ table below), point the shell at it once (`.env` in `~/.bashrc`), or use
 | `--tls-skip-verify` | `IBKR_GATEWAY_TLS_SKIP_VERIFY` | `false` |
 | `--db` | `IBKR_STORE_DB` | `ibkr.db` |
 | `--config` | `IBKR_CONFIG` | `$XDG_CONFIG_HOME/ibkr/config.toml` |
+| `--read-only` | `IBKR_READ_ONLY` | `false` |
 | `-o, --output` | — | `json` |
 
 Errors are mapped onto the gateway's machine-readable `kind` values in
@@ -192,6 +193,14 @@ ibkr orders place ... --yes          # scripts: explicit, no prompt
 Arguments are validated locally first (a `LIMIT` without `--limit-price`, a
 non-positive quantity, or bracket targets on the wrong side of the entry all
 fail before anything is sent).
+
+Read-only mode refuses `orders place`, `orders bracket` and `orders cancel`
+before validation and before anything is sent: turn it on with `--read-only`,
+`IBKR_READ_ONLY`, or `read-only = true` in the config file (`ibkr configure
+--read-only` writes that). Reads are untouched, so an agent or a cron job can be
+given a store and a report feed without a way to reach the order book. The
+gateway's own `GATEWAY_READ_ONLY` stays the authority; this is a guard rail that
+fails earlier and says why.
 
 Order placement sends an `Idempotency-Key`: either `--idempotency-key` or a
 generated UUID, which is printed to stderr. Re-using that key with the same

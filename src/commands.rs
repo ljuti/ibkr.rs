@@ -39,7 +39,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
         Command::Contracts(command) => contracts(&client, command, mode).await,
         Command::MarketData(command) => market_data(&client, command, mode).await,
         Command::Accounts(command) => accounts(&client, command, mode).await,
-        Command::Orders(command) => orders(&client, command, mode).await,
+        Command::Orders(command) => orders(&client, &config, command, mode).await,
         Command::Flex(command) => flex(&client, command, mode).await,
         Command::Store(command) => store(&client, &config, command, mode).await,
         Command::Stream(command) => Err(Error::Unimplemented {
@@ -114,7 +114,12 @@ async fn accounts(client: &Client, command: AccountsCommand, mode: RenderMode) -
     }
 }
 
-async fn orders(client: &Client, command: OrdersCommand, mode: RenderMode) -> Result<()> {
+async fn orders(
+    client: &Client,
+    config: &Config,
+    command: OrdersCommand,
+    mode: RenderMode,
+) -> Result<()> {
     match command {
         OrdersCommand::Place {
             contract,
@@ -129,6 +134,9 @@ async fn orders(client: &Client, command: OrdersCommand, mode: RenderMode) -> Re
             idempotency_key,
             yes,
         } => {
+            // Read-only first: nothing below this line runs, so no validation
+            // prompt and no request can happen.
+            config.ensure_writable("orders place")?;
             let request = OrderRequest {
                 contract: contract.to_spec(),
                 side: side.into(),
@@ -162,6 +170,7 @@ async fn orders(client: &Client, command: OrdersCommand, mode: RenderMode) -> Re
             idempotency_key,
             yes,
         } => {
+            config.ensure_writable("orders bracket")?;
             let request = BracketOrderRequest {
                 contract: contract.to_spec(),
                 side: side.into(),
@@ -208,6 +217,7 @@ async fn orders(client: &Client, command: OrdersCommand, mode: RenderMode) -> Re
         }
 
         OrdersCommand::Cancel { order_id, yes } => {
+            config.ensure_writable("orders cancel")?;
             let summary = output::kv_table(&[("orderId", order_id.to_string())]);
             confirm("cancel order", &summary.to_string(), yes)?;
             output::cancelled(&client.cancel_order(order_id).await?, mode)

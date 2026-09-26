@@ -32,6 +32,8 @@ pub mod var {
     pub const STORE_DB: &str = "IBKR_STORE_DB";
     /// Configuration file holding settings written by `ibkr configure`.
     pub const CONFIG: &str = "IBKR_CONFIG";
+    /// Refuse order mutations locally (the gateway has its own `GATEWAY_READ_ONLY`).
+    pub const READ_ONLY: &str = "IBKR_READ_ONLY";
 }
 
 /// Default gateway URL, matching the gateway's own `BIND_ADDR` default.
@@ -73,6 +75,8 @@ pub struct Config {
     pub tls_skip_verify: bool,
     /// `SQLite` file backing `ibkr store`.
     pub db: PathBuf,
+    /// Whether order mutations are refused before they are sent.
+    pub read_only: bool,
     /// Configuration file these settings were resolved with.
     pub config_path: PathBuf,
     /// What that file contained (empty when it does not exist).
@@ -105,6 +109,8 @@ pub struct ConfigOverrides {
     pub tls_skip_verify: Option<bool>,
     /// Override for [`var::STORE_DB`].
     pub db: Option<PathBuf>,
+    /// Override for [`var::READ_ONLY`].
+    pub read_only: Option<bool>,
     /// Override for [`var::CONFIG`]: which file to read and write.
     pub config: Option<PathBuf>,
 }
@@ -132,6 +138,8 @@ pub struct ConfigFile {
     pub max_retries: Option<u32>,
     /// Accept invalid server certificates (development only).
     pub tls_skip_verify: Option<bool>,
+    /// Refuse order mutations locally.
+    pub read_only: Option<bool>,
     /// Local store database used by `ibkr store`.
     pub db: Option<PathBuf>,
 }
@@ -394,6 +402,14 @@ impl Config {
         );
         record(&mut sources, "tls-skip-verify", source);
 
+        let (read_only, source) = setting(
+            overrides.read_only,
+            env_string(&lookup, var::READ_ONLY).map(|value| is_truthy(&value)),
+            file.read_only,
+            false,
+        );
+        record(&mut sources, "read-only", source);
+
         let (db, source) = setting(
             overrides.db,
             env_string(&lookup, var::STORE_DB).map(PathBuf::from),
@@ -446,6 +462,7 @@ impl Config {
             timeout: Duration::from_secs(timeout_secs),
             max_retries,
             tls_skip_verify,
+            read_only,
             db,
             config_path,
             file,
@@ -453,6 +470,22 @@ impl Config {
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Refuse a broker mutation when read-only mode is on.
+    ///
+    /// A guard rail, not the authority: the gateway has its own read-only mode
+    /// and enforces it. This one fails earlier, before anything is sent, and
+    /// says which switch turned it on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] when read-only mode is enabled.
+    pub fn ensure_writable(&self, command: &'static str) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly { command });
+        }
+        Ok(())
     }
 
     /// Whether the configured endpoint uses TLS.
@@ -796,6 +829,55 @@ mod tests {
             std::env::temp_dir().join(format!("ibkr-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         directory.join("config.toml")
+    }
+
+    #[test]
+    fn read_only_follows_flag_then_environment_then_file() {
+        // Default: mutations allowed.
+        let config = Config::resolve_with(ConfigOverrides::default(), env(&[])).unwrap();
+        assert!(!config.read_only);
+        assert_eq!(config.sources.get("read-only"), Some(&Source::Default));
+        assert!(config.ensure_writable("orders place").is_ok());
+
+        // The environment turns it on (and the guard names the command).
+        let lookup = env(&[(var::READ_ONLY, "yes")]);
+        let config = Config::resolve_with(ConfigOverrides::default(), lookup).unwrap();
+        assert!(config.read_only);
+        assert_eq!(config.sources.get("read-only"), Some(&Source::Environment));
+        let error = config.ensure_writable("orders cancel").unwrap_err();
+        assert!(error.to_string().contains("orders cancel"), "{error}");
+        assert!(error.to_string().contains("read-only"), "{error}");
+
+        // The config file turns it on.
+        let path = temp_config("read-only");
+        ConfigFile {
+            read_only: Some(true),
+            ..ConfigFile::default()
+        }
+        .save(&path)
+        .unwrap();
+        let overrides = ConfigOverrides {
+            config: Some(path.clone()),
+            ..ConfigOverrides::default()
+        };
+        let config = Config::resolve_with(overrides, env(&[])).unwrap();
+        assert!(config.read_only);
+        assert_eq!(config.sources.get("read-only"), Some(&Source::File));
+
+        // A flag wins over both, in either direction: false is a real value.
+        let lookup = env(&[(var::READ_ONLY, "yes")]);
+        let flags = ConfigOverrides {
+            config: Some(path.clone()),
+            read_only: Some(false),
+            ..ConfigOverrides::default()
+        };
+        let config = Config::resolve_with(flags, lookup).unwrap();
+        assert!(
+            !config.read_only,
+            "an explicit --read-only=false must not be overridden by env or file"
+        );
+        assert!(config.ensure_writable("orders place").is_ok());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

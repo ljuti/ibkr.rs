@@ -107,6 +107,15 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(String),
 
+    /// Read-only mode is on, so a broker mutation was refused before it was sent.
+    #[error(
+        "read-only: `{command}` is disabled (unset --read-only, IBKR_READ_ONLY or `read-only` in the config file)"
+    )]
+    ReadOnly {
+        /// Human-readable command name, for example `orders place`.
+        command: &'static str,
+    },
+
     /// The user declined a confirmation prompt; nothing was sent.
     #[error("aborted: nothing was sent")]
     Aborted,
