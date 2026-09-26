@@ -246,8 +246,8 @@ keys a lot by its *opening* execution and carries the close, the matched
 quantity, the cost basis and the realized P/L on the row, which is the exact
 answer to "when was this opened, when was it closed, what did it realize?".
 Without lots it falls back to closing executions, where `opened` is `-`
-whenever IBKR leaves `openDateTime` empty at execution level (observed on all
-4,848 executions of a real 365-day statement).
+whenever IBKR leaves `openDateTime` empty at execution level (observed on
+every execution of a real 365-day statement).
 
 `-o json` prints the payload as delivered, which for cash means **both**
 levels: filter on `levelOfDetail` (`DETAIL` is the movements, `SUMMARY`
@@ -390,3 +390,7 @@ host — do not expose the container.
 
 Endpoint behaviour is verified against a running gateway; there is no in-repo
 gateway fixture yet.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

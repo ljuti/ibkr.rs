@@ -3,7 +3,13 @@
 # Credentials and key material — never tracked.
 /.certs
 /.env
-/.env.local
+/.env.*
+!.env.example
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
 # Live-gateway client bundle for this machine (ca.pem + client cert + key).
 /tmp
 # Private keys anywhere: the cert half is fine to commit, the key half is not.
