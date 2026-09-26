@@ -75,10 +75,18 @@ fn flex_vectors_hold() {
 }
 
 /// Apply one case and check every expectation it states.
+///
+/// The case directory is removed whichever way the case ends: a failing vector
+/// is exactly when the next run needs a clean slate.
 fn check(case: &Value) -> Result<(), String> {
-    let name = case["name"].as_str().unwrap_or("case");
-    let path = store_path(name);
-    let mut store = Store::open(&path).map_err(|error| format!("cannot open a store: {error}"))?;
+    let path = store_path(case["name"].as_str().unwrap_or("case"));
+    let outcome = check_case(case, &path);
+    cleanup(&path);
+    outcome
+}
+
+fn check_case(case: &Value, path: &Path) -> Result<(), String> {
+    let mut store = Store::open(path).map_err(|error| format!("cannot open a store: {error}"))?;
 
     // The payload must decode: that is the first expectation of every case.
     let payload: FlexReportResponse = serde_json::from_value(case["raw"].clone())
@@ -134,8 +142,6 @@ fn check(case: &Value) -> Result<(), String> {
         }
     }
 
-    drop(store);
-    cleanup(&path);
     Ok(())
 }
 
