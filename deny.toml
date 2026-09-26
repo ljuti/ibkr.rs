@@ -22,6 +22,9 @@ allow = [
     "ISC",
     "MIT",
     "Unicode-3.0",
+    # Zlib: foldhash, pulled in by rusqlite's hashbrown. Permissive and
+    # OSI-approved, same class as MIT/BSD.
+    "Zlib",
 ]
 confidence-threshold = 0.93
 
