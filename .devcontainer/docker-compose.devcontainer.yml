@@ -1,15 +1,22 @@
 # Development stack for the ibkr CLI client.
 #
 #   devcontainer  this workspace (Rust toolchain + docker CLI)  — default
-#   ibkr-gateway  the IBKR gateway, built from ../ibkr-gateway  — profile `gateway`
+#   ibkr-gateway  the IBKR gateway, built from the sibling repo — profile `gateway`
 #   ib-gateway    headless IB Gateway broker                    — profile `broker`
 #
-# The gateway services are profile-gated: the workspace opens immediately and
-# does not depend on a build of the sibling gateway repo. Start them with
-# `just gateway-up` once the dev certificates exist (post-create generates
-# them).
+# The gateway services are profile-gated: the workspace container starts on its
+# own and never requires the sibling gateway repo to exist.
 #
-# All relative paths resolve against this file's directory (.devcontainer/).
+# That property is load-bearing. The devcontainer CLI resolves this file with
+# `docker compose --profile * config`, which activates EVERY profile — so both
+# gateway services are validated on every start, whether or not they are used.
+# Compose tolerates a missing build context and missing bind-mount sources, but
+# a missing `env_file` is fatal, which is why the broker's env file is
+# `required: false`.
+#
+# Paths resolve against this file's directory (.devcontainer/):
+#   ..        the repo root      (this workspace, .certs)
+#   ../../    its parent         (where the sibling ibkr-gateway repo lives)
 
 services:
   devcontainer:
@@ -25,8 +32,10 @@ services:
       - /var/run/docker.sock:/var/run/docker-host.sock
       - ..:/workspaces/ibkr.rs:cached
       # Sibling gateway repo: build context for `ibkr-gateway`, and the .env
-      # holding broker credentials for the `ib-gateway` profile.
-      - ../ibkr-gateway:/workspaces/ibkr-gateway:cached
+      # holding broker credentials for the `ib-gateway` profile. Optional —
+      # Docker creates an empty directory when the repo is absent, and only
+      # the gateway profiles need it.
+      - ../../ibkr-gateway:/workspaces/ibkr-gateway:cached
     environment:
       # Defaults match the `ibkr-gateway` service and scripts/gen-dev-certs.sh.
       # Override GATEWAY_API_TOKENS/IBKR_GATEWAY_TOKEN together if you change
@@ -44,7 +53,7 @@ services:
   ibkr-gateway:
     profiles: ["gateway"]
     build:
-      context: ../ibkr-gateway
+      context: ../../ibkr-gateway
       dockerfile: Dockerfile
     restart: unless-stopped
     volumes:
@@ -63,7 +72,7 @@ services:
       - "127.0.0.1:8080:8080"
 
   # Headless IB Gateway (Xvfb + automated login/2FA). Needs real credentials
-  # in ../ibkr-gateway/.env; first boot takes 2-3 minutes.
+  # in the sibling repo's .env; first boot takes 2-3 minutes.
   ib-gateway:
     profiles: ["broker"]
     image: ghcr.io/code-hustler-ft3d/ibg-controller:v0.7.0
@@ -71,7 +80,12 @@ services:
     # The controller drives a clean logout on SIGTERM; Docker's default 10s
     # strands an IBKR session slot on every restart.
     stop_grace_period: 90s
-    env_file: ../ibkr-gateway/.env
+    # `required: false` keeps this file valid for `--profile * config` when the
+    # sibling repo (or just its .env) is absent; the broker profile then simply
+    # starts without credentials.
+    env_file:
+      - path: ../../ibkr-gateway/.env
+        required: false
     ports:
       - "127.0.0.1:4001:4003" # live socket
       - "127.0.0.1:4002:4004" # paper socket
