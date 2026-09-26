@@ -22,6 +22,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod output;
+pub mod store;
 pub mod types;
 
 pub use client::Client;

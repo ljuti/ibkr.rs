@@ -7,12 +7,13 @@ use uuid::Uuid;
 
 use crate::cli::{
     AccountsCommand, Cli, Command, ContractArgs, ContractsCommand, FlexCommand, MarketDataCommand,
-    OrdersCommand, RenderMode,
+    OrdersCommand, RenderMode, StoreCommand,
 };
-use crate::client::{Client, RetryAttempt, RetryObserver};
+use crate::client::{Client, Conditional, RetryAttempt, RetryObserver};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::output;
+use crate::store::{Store, SyncOutcome};
 use crate::types::{
     BracketOrderRequest, ContractDetailsRequest, ExecutionFilter, HistoricalDataRequest,
     OrderRequest, TimeInForce,
@@ -36,6 +37,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
         Command::Accounts(command) => accounts(&client, command, mode).await,
         Command::Orders(command) => orders(&client, command, mode).await,
         Command::Flex(command) => flex(&client, command, mode).await,
+        Command::Store(command) => store(&client, &config, command, mode).await,
         Command::Stream(command) => Err(Error::Unimplemented {
             command: command.label(),
         }),
@@ -232,6 +234,57 @@ async fn flex(client: &Client, command: FlexCommand, mode: RenderMode) -> Result
                 .await?,
             mode,
         ),
+    }
+}
+
+/// Sync Flex reports into the local store, or query what is already there.
+async fn store(
+    client: &Client,
+    config: &Config,
+    command: StoreCommand,
+    mode: RenderMode,
+) -> Result<()> {
+    match command {
+        StoreCommand::Sync { reports, refresh } => {
+            let mut store = Store::open(&config.db)?;
+            let mut outcomes = Vec::with_capacity(reports.len());
+            for report in &reports {
+                // Statements are immutable per (query, window), so a stored
+                // ETag turns a re-sync into a 304 and skips the ingest.
+                let etag = if refresh {
+                    None
+                } else {
+                    store.last_etag(report)?
+                };
+                output::note(&format!("syncing {report}"));
+                match client.flex_report(report, refresh, etag.as_deref()).await? {
+                    Conditional::NotModified { etag } => {
+                        outcomes.push(SyncOutcome::NotModified {
+                            report: report.clone(),
+                            etag,
+                        });
+                    }
+                    Conditional::Fresh { value, etag } => {
+                        outcomes.push(SyncOutcome::Synced(store.upsert_report(
+                            report,
+                            etag.as_deref(),
+                            &value,
+                        )?));
+                    }
+                }
+            }
+            output::store_sync(&outcomes, mode)
+        }
+
+        StoreCommand::Query { sql } => {
+            let store = Store::open_read_only(&config.db)?;
+            output::store_query(&store.query(&sql)?, mode)
+        }
+
+        StoreCommand::Schema => {
+            let store = Store::open_read_only(&config.db)?;
+            output::store_schema(&store.schema()?, mode)
+        }
     }
 }
 

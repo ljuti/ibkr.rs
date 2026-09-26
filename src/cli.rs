@@ -76,6 +76,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub tls_skip_verify: bool,
 
+    /// Local store database file, used by `store` (env: `IBKR_STORE_DB`).
+    #[arg(long, value_name = "PATH", global = true)]
+    pub db: Option<PathBuf>,
+
     /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t = Output::Json, global = true)]
     pub output: Output,
@@ -97,6 +101,7 @@ impl GlobalArgs {
             timeout: self.timeout.map(Duration::from_secs),
             max_retries: self.max_retries,
             tls_skip_verify: self.tls_skip_verify.then_some(true),
+            db: self.db.clone(),
         }
     }
 
@@ -172,6 +177,10 @@ pub enum Command {
     #[command(subcommand)]
     Flex(FlexCommand),
 
+    /// Local `SQLite` store of Flex statement data.
+    #[command(subcommand)]
+    Store(StoreCommand),
+
     /// WebSocket streams (market data, order updates, account values).
     #[command(subcommand)]
     Stream(StreamCommand),
@@ -187,6 +196,7 @@ impl Command {
             Self::Accounts(command) => command.label(),
             Self::Orders(command) => command.label(),
             Self::Flex(command) => command.label(),
+            Self::Store(command) => command.label(),
             Self::Stream(command) => command.label(),
         }
     }
@@ -749,6 +759,51 @@ impl FlexCommand {
     }
 }
 
+/// Local trade store: Flex statements, queryable with SQL.
+#[derive(Debug, Subcommand)]
+pub enum StoreCommand {
+    /// Fetch Flex reports and upsert them into the store.
+    ///
+    /// Rows are keyed by their IB transaction id, so re-syncing, re-fetching a
+    /// corrected statement, or syncing overlapping report windows all leave one
+    /// row per execution.
+    Sync {
+        /// Registered report name; repeat to sync several.
+        #[arg(
+            short = 'r',
+            long = "report",
+            value_name = "NAME",
+            required = true,
+            action = clap::ArgAction::Append
+        )]
+        reports: Vec<String>,
+
+        /// Ignore stored `ETag`s and fetch every report afresh.
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// Run a read-only SQL query against the store.
+    Query {
+        /// SQL statement, for example `SELECT * FROM pnl_by_symbol LIMIT 10`.
+        sql: String,
+    },
+
+    /// List the store's tables, views and columns.
+    Schema,
+}
+
+impl StoreCommand {
+    /// Human-readable name used in diagnostics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Sync { .. } => "store sync",
+            Self::Query { .. } => "store query",
+            Self::Schema => "store schema",
+        }
+    }
+}
+
 /// Streaming commands. Declared, not implemented.
 #[derive(Debug, Subcommand)]
 pub enum StreamCommand {
@@ -1053,6 +1108,50 @@ mod tests {
             cli.global.token.is_none(),
             "a positional must not become the bearer token"
         );
+    }
+
+    #[test]
+    fn store_commands_parse_with_repeated_reports() {
+        let cli = parse(&[
+            "ibkr",
+            "store",
+            "sync",
+            "--report",
+            "transactions_30d",
+            "-r",
+            "last_365_days",
+        ]);
+        match cli.command {
+            Command::Store(StoreCommand::Sync { reports, refresh }) => {
+                assert_eq!(reports, vec!["transactions_30d", "last_365_days"]);
+                assert!(!refresh);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse(&[
+            "ibkr",
+            "--db",
+            "data/trades.db",
+            "store",
+            "query",
+            "SELECT 1",
+        ]);
+        match cli.command {
+            Command::Store(StoreCommand::Query { sql }) => assert_eq!(sql, "SELECT 1"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert_eq!(
+            cli.global.overrides().db.as_deref(),
+            Some(std::path::Path::new("data/trades.db"))
+        );
+
+        let cli = parse(&["ibkr", "store", "schema"]);
+        assert!(matches!(cli.command, Command::Store(StoreCommand::Schema)));
+
+        // `--report` is what selects a lot; an empty sync is a mistake, not a
+        // no-op that silently reports success.
+        assert!(Cli::try_parse_from(["ibkr", "store", "sync"]).is_err());
     }
 
     #[test]

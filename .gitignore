@@ -10,6 +10,11 @@
 *-key.pem
 *.key
 
+# Local trade store created by `ibkr store` (default --db location).
+/ibkr.db
+/ibkr.db-wal
+/ibkr.db-shm
+
 # Local tool/editor state
 .idea/
 .DS_Store

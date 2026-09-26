@@ -103,6 +103,10 @@ pub enum Error {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The local trade store (`SQLite`) rejected an operation.
+    #[error("store error: {0}")]
+    Store(String),
+
     /// The user declined a confirmation prompt; nothing was sent.
     #[error("aborted: nothing was sent")]
     Aborted,
@@ -118,6 +122,14 @@ pub enum Error {
         /// Human-readable command name, for example `orders place`.
         command: &'static str,
     },
+}
+
+/// `SQLite` failures are rendered into [`Error::Store`] rather than carrying the
+/// driver's error type through the crate's public surface.
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error.to_string())
+    }
 }
 
 #[cfg(test)]

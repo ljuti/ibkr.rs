@@ -640,6 +640,153 @@ fn envelope_note(count: usize, label: &str, truncated: bool) {
     note(&format!("{label}: {count} (truncated: {truncated})"));
 }
 
+// ---------------------------------------------------------------------------
+// Local store
+// ---------------------------------------------------------------------------
+
+/// Render the outcome of `store sync`.
+pub fn store_sync(outcomes: &[crate::store::SyncOutcome], mode: RenderMode) -> Result<()> {
+    if mode.output == crate::cli::Output::Json {
+        let values: Vec<serde_json::Value> = outcomes.iter().map(sync_outcome_json).collect();
+        return json(&values);
+    }
+    let mut table = Table::new(&[
+        "report",
+        "status",
+        "from",
+        "to",
+        "executions",
+        "lots",
+        "cash",
+        "skipped",
+        "etag",
+    ]);
+    for outcome in outcomes {
+        match outcome {
+            crate::store::SyncOutcome::Synced(stats) => table.push(vec![
+                stats.report.clone(),
+                "synced".to_owned(),
+                opt_text(stats.from_date.as_deref()),
+                opt_text(stats.to_date.as_deref()),
+                stats.executions.to_string(),
+                stats.lots.to_string(),
+                stats.cash_transactions.to_string(),
+                stats.skipped.to_string(),
+                opt_text(stats.etag.as_deref()),
+            ]),
+            crate::store::SyncOutcome::NotModified { report, etag } => table.push(vec![
+                report.clone(),
+                "not modified".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                opt_text(etag.as_deref()),
+            ]),
+        }
+    }
+    print_table(&table, mode)
+}
+
+/// One sync outcome as JSON: `status` first, then the fields that apply.
+fn sync_outcome_json(outcome: &crate::store::SyncOutcome) -> serde_json::Value {
+    match outcome {
+        crate::store::SyncOutcome::Synced(stats) => {
+            let mut object = serde_json::Map::new();
+            object.insert("status".to_owned(), serde_json::json!("synced"));
+            if let serde_json::Value::Object(fields) =
+                serde_json::to_value(stats).unwrap_or_default()
+            {
+                object.extend(fields);
+            }
+            serde_json::Value::Object(object)
+        }
+        crate::store::SyncOutcome::NotModified { report, etag } => serde_json::json!({
+            "status": "notModified",
+            "report": report,
+            "etag": etag,
+        }),
+    }
+}
+
+/// Render rows returned by `store query`.
+pub fn store_query(result: &crate::store::QueryResult, mode: RenderMode) -> Result<()> {
+    if mode.output == crate::cli::Output::Json {
+        let rows: Vec<serde_json::Value> = result
+            .rows
+            .iter()
+            .map(|row| {
+                let mut object = serde_json::Map::with_capacity(result.columns.len());
+                for (column, cell) in result.columns.iter().zip(row) {
+                    object.insert(column.clone(), cell_json(cell));
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect();
+        return json(&rows);
+    }
+    let headers: Vec<&str> = result.columns.iter().map(String::as_str).collect();
+    let mut table = Table::new(&headers);
+    for row in &result.rows {
+        table.push(row.iter().map(cell_text).collect());
+    }
+    print_table(&table, mode)
+}
+
+/// Render the store's tables and views.
+pub fn store_schema(entries: &[crate::store::SchemaEntry], mode: RenderMode) -> Result<()> {
+    if mode.output == crate::cli::Output::Json {
+        let values: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "name": entry.name,
+                    "kind": entry.kind,
+                    "columns": entry.columns,
+                })
+            })
+            .collect();
+        return json(&values);
+    }
+    let mut table = Table::new(&["name", "kind", "columns"]);
+    for entry in entries {
+        table.push(vec![
+            entry.name.clone(),
+            entry.kind.clone(),
+            entry.columns.join(", "),
+        ]);
+    }
+    print_table(&table, mode)
+}
+
+/// A query cell as JSON, keeping `SQLite`'s types.
+fn cell_json(cell: &rusqlite::types::Value) -> serde_json::Value {
+    use rusqlite::types::Value;
+    match cell {
+        Value::Null => serde_json::Value::Null,
+        Value::Integer(number) => serde_json::json!(number),
+        Value::Real(number) => serde_json::Number::from_f64(*number)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        Value::Text(text) => serde_json::json!(text),
+        // Blobs have no place in a trade table; the size is enough to spot one.
+        Value::Blob(bytes) => serde_json::json!(format!("<{} bytes>", bytes.len())),
+    }
+}
+
+/// A query cell for a table column: `-` for SQL `NULL`.
+fn cell_text(cell: &rusqlite::types::Value) -> String {
+    use rusqlite::types::Value;
+    match cell {
+        Value::Null => "-".to_owned(),
+        Value::Integer(value) => value.to_string(),
+        Value::Real(value) => number(*value),
+        Value::Text(text) => text.clone(),
+        Value::Blob(bytes) => format!("<{} bytes>", bytes.len()),
+    }
+}
+
 /// A Flex enum value, or `None` when it carries no information.
 ///
 /// IBKR emits attributes that do not apply to an instrument as empty strings,
@@ -673,21 +820,13 @@ fn closes_position(trade: &Trade) -> bool {
 
 /// The date part of a Flex date-time, `-` when absent.
 ///
-/// Flex separates date and time inconsistently and emits compact dates —
-/// `20260608;155631`, `2025-01-15;100000`, `2025-01-15 10:00:00`,
-/// `2025-01-15T10:00:00` — while the tables only show the date. A compact
-/// `YYYYMMDD` is normalized to the ISO form the gateway uses for the fields it
-/// parses into dates, so `opened` and `closed` read the same way.
+/// Statements encode the two inconsistently (`20260608;155631`,
+/// `2025-01-15;100000`, `2025-01-15 10:00:00`); the tables show the date,
+/// normalized so `opened` and `closed` read the same way.
 fn date_part(value: Option<&str>) -> String {
-    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
-        return "-".to_owned();
-    };
-    let date = text.split([' ', ',', ';', 'T']).next().unwrap_or(text);
-    if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) {
-        format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8])
-    } else {
-        date.to_owned()
-    }
+    value
+        .and_then(crate::types::flex_date)
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 #[cfg(test)]

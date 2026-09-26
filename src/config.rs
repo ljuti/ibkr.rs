@@ -24,6 +24,8 @@ pub mod var {
     pub const MAX_RETRIES: &str = "IBKR_GATEWAY_MAX_RETRIES";
     /// Accept invalid server certificates (development only).
     pub const TLS_SKIP_VERIFY: &str = "IBKR_GATEWAY_TLS_SKIP_VERIFY";
+    /// Local store database file used by `ibkr store`.
+    pub const STORE_DB: &str = "IBKR_STORE_DB";
 }
 
 /// Default gateway URL, matching the gateway's own `BIND_ADDR` default.
@@ -38,6 +40,8 @@ pub const DEFAULT_CLIENT_KEY: &str = ".certs/client-key.pem";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Default retries for rate-limited reads (`0` disables retrying).
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
+/// Default local store database (relative to the working directory).
+pub const DEFAULT_STORE_DB: &str = "ibkr.db";
 
 /// Resolved client configuration.
 #[derive(Debug, Clone)]
@@ -58,6 +62,8 @@ pub struct Config {
     pub max_retries: u32,
     /// Whether TLS verification is disabled (development only).
     pub tls_skip_verify: bool,
+    /// `SQLite` file backing `ibkr store`.
+    pub db: PathBuf,
 }
 
 /// Command-line values that override the environment.
@@ -82,6 +88,8 @@ pub struct ConfigOverrides {
     pub max_retries: Option<u32>,
     /// Override for [`var::TLS_SKIP_VERIFY`].
     pub tls_skip_verify: Option<bool>,
+    /// Override for [`var::STORE_DB`].
+    pub db: Option<PathBuf>,
 }
 
 impl Config {
@@ -169,6 +177,12 @@ impl Config {
                     env_string(&lookup, var::TLS_SKIP_VERIFY).map(|value| is_truthy(&value))
                 })
                 .unwrap_or(false),
+            // Unlike the certificates, the store is created on first use, so a
+            // missing file is not an error and no existence check applies.
+            db: overrides
+                .db
+                .or_else(|| env_string(&lookup, var::STORE_DB).map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_STORE_DB)),
         };
         config.validate()?;
         Ok(config)
@@ -260,6 +274,24 @@ mod tests {
         assert!(config.token.is_none());
         assert!(!config.tls_skip_verify);
         assert!(config.is_https());
+        assert_eq!(config.db, PathBuf::from(DEFAULT_STORE_DB));
+    }
+
+    #[test]
+    fn store_path_follows_flag_then_environment_then_default() {
+        // Unlike the certificates, the store file need not exist yet: it is
+        // created on the first sync, so no existence check may filter it out.
+        let lookup = env(&[(var::STORE_DB, "from-env/trades.db")]);
+        let config = Config::resolve_with(ConfigOverrides::default(), lookup).unwrap();
+        assert_eq!(config.db, PathBuf::from("from-env/trades.db"));
+
+        let lookup = env(&[(var::STORE_DB, "from-env/trades.db")]);
+        let overrides = ConfigOverrides {
+            db: Some(PathBuf::from("from-flag/trades.db")),
+            ..ConfigOverrides::default()
+        };
+        let config = Config::resolve_with(overrides, lookup).unwrap();
+        assert_eq!(config.db, PathBuf::from("from-flag/trades.db"));
     }
 
     #[test]

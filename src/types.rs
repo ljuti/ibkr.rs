@@ -756,6 +756,31 @@ pub struct CashTransaction {
     pub conid: Option<String>,
     /// Symbol.
     pub symbol: Option<String>,
+    /// Which projection this row came from: `DETAIL` for the individual cash
+    /// movements, `SUMMARY` for per-report-date aggregates of the same money.
+    /// Summing both double counts; a `SUMMARY` row carries no transaction id.
+    pub level_of_detail: Option<String>,
+}
+
+/// Normalize a Flex date-time to an ISO date, `None` when it carries none.
+///
+/// Flex separates date and time inconsistently and emits compact dates —
+/// `20260608;155631`, `2025-01-15;100000`, `2025-01-15 10:00:00`,
+/// `2025-01-15T10:00:00`. Only the date survives, normalized so it lines up
+/// with the fields the gateway parses into dates.
+pub(crate) fn flex_date(value: &str) -> Option<String> {
+    let text = value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let date = text.split([' ', ',', ';', 'T']).next().unwrap_or(text);
+    if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some(format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]))
+    } else if date.is_empty() {
+        None
+    } else {
+        Some(date.to_owned())
+    }
 }
 
 /// Flex report envelope: trades and cash transactions in one response.

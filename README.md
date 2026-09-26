@@ -19,6 +19,7 @@ to every call.
 | Accounts | `accounts positions`, `accounts summary`, `accounts pnl` | implemented |
 | Orders | `orders place`, `bracket`, `list`, `completed`, `executions`, `cancel` | implemented |
 | Flex | `flex config`, `set-query`, `set-token`, `report` | implemented |
+| Store | `store sync`, `store query`, `store schema` | implemented |
 | Streaming | `stream bars`, `market-data`, `tick-by-tick`, `orders`, `account-values` | not implemented |
 
 The REST surface is complete: every route the gateway exposes has a typed
@@ -60,6 +61,7 @@ src/
   config.rs    # flags + environment + defaults resolution
   error.rs     # Error / ApiError / ErrorKind
   output.rs    # JSON and table rendering, column projections
+  store/       # local SQLite store of Flex statements (schema, sync, query)
   types.rs     # wire types (camelCase, timestamps as RFC 3339 strings)
 scripts/
   gen-dev-certs.sh   # dev CA + server + client certificates
@@ -130,6 +132,7 @@ config.
 | `--timeout` | `IBKR_GATEWAY_TIMEOUT_SEC` | `60` |
 | `--max-retries` | `IBKR_GATEWAY_MAX_RETRIES` | `3` |
 | `--tls-skip-verify` | `IBKR_GATEWAY_TLS_SKIP_VERIFY` | `false` |
+| `--db` | `IBKR_STORE_DB` | `ibkr.db` |
 | `-o, --output` | — | `json` |
 
 Errors are mapped onto the gateway's machine-readable `kind` values in
@@ -230,6 +233,62 @@ P/L, multiplier, option identity, order/exec ids — is in the JSON payload,
 which does include the gateway's contract request tracked in
 [ibkr-gateway#3](https://github.com/ljuti/ibkr-gateway/issues/3).
 
+### Local trade store
+
+Flex statements are the only complete transaction history the gateway can
+produce, but they arrive one report (one window) at a time. `store` keeps them
+in a single SQLite file so performance can be asked as SQL:
+
+```bash
+ibkr store sync --report last_365_days --report transactions_30d   # fetch + upsert
+ibkr store schema                                                 # tables, views, columns
+ibkr store query "SELECT * FROM trade_stats" -o table
+ibkr store query "SELECT * FROM pnl_by_month"
+```
+
+`sync` is idempotent and overlap-safe: rows are keyed by their IB transaction
+id, so re-syncing, re-fetching a corrected statement, or syncing overlapping
+reports (the 30-day and 365-day windows share executions) all leave one row per
+execution. Each report's ETag is stored, so a re-sync the gateway answers with
+`304` ingests nothing. Rows are split by level of detail — executions, closed
+lots (`round_trips`, empty until the gateway exposes them) and aggregates —
+because Flex mixes levels in one array and summing across them double counts.
+Cash transactions get the same treatment: only `DETAIL` rows are stored, since
+`SUMMARY` rows aggregate the same money per report date.
+
+Views answer the usual questions with the broker's own numbers:
+
+| View | Answers |
+|------|---------|
+| `pnl_by_symbol`, `pnl_by_month`, `pnl_by_asset_class` | realized P/L per close, grouped |
+| `trade_stats` | closes, wins, losses, flat, realized P/L, average win/loss |
+| `cash_by_type` | dividends, withholding, fees, interest, transfers |
+| `open_positions` | net position per contract, derived from executions |
+| `round_trips` | opening execution ↔ close, quantity, cost basis, realized P/L |
+
+`realized_pnl` is the broker's figure for a closing execution, not something
+recomputed here: pairing executions ourselves reproduces the broker's open
+dates for ~88% of closes but not its P/L, because opens before the window,
+securities transfers and specific-lot consumption are not visible in the
+statement's execution rows.
+
+`open_positions` inherits those limits and says so: `first_indicator` is the
+open/close flag of the contract's earliest synced row, and a contract whose
+window starts with a *close* was already open — its running sum is a fragment
+of history and can look open when the broker holds nothing. Measured against
+`accounts positions` for one 365-day window: 71 of 80 contracts with
+`first_indicator = 'O'` agreed exactly, against 71 of 115 unfiltered; two live
+positions never appear (transferred in, or opened before the window). Treat the
+view as a reconciliation aid — `accounts positions` is the authority.
+
+Cash rows carry no date until
+[ljuti/ibkr-gateway#7](https://github.com/ljuti/ibkr-gateway/issues/7) lands, so
+`cash_by_type` is a total per type, not a time series.
+
+The file is ordinary SQLite: `sqlite3`, DuckDB, pandas and Metabase can all
+read it. `store query` opens it read-only, so a stray statement cannot damage
+what a sync took minutes to fetch.
+
 ## Development
 
 Host requirements: Rust (the pinned toolchain installs via rustup) and, for the
@@ -285,6 +344,9 @@ host — do not expose the container.
 * **CLI surface** — parsed command forms, global flags before and after the
   subcommand, mutation classification, instrument descriptions, and a
   regression test for a positional silently shadowing the global `--token`.
+* **Store** — schema application and versioning, idempotent/overlapping syncs,
+  level-of-detail partitioning (executions vs lots vs aggregates, cash detail
+  vs summary), ETag state, read-only queries, and the analysis views.
 * **Rendering** — column alignment, terminal-width shrinking with elision,
   number formatting, absent-value handling, Flex close detection, enum-sentinel
   handling and the date-time projection.
