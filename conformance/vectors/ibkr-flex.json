@@ -1,0 +1,555 @@
+{
+  "broker": "ibkr-flex",
+  "description": "The gateway's Flex report payload → what a conforming consumer must decode, store and answer. Cases are drawn from rules learned the hard way against real statements (see `why`), with synthetic accounts and amounts.",
+  "source": "GET /api/v1/accounts/reports/{name} on the IBKR gateway (FlexReportResponse).",
+  "conventions": {
+    "raw": "The payload exactly as the gateway sends it.",
+    "expect.ingest": "SyncStats for the primary sync: rows stored, and rows deliberately skipped.",
+    "expect.payload": "Field assertions on the decoded payload (dotted path; numbers index arrays). `null` means the key is absent or null on the wire — IBKR emits empty attributes for fields that do not apply.",
+    "expect.queries": "Store-level assertions: SQL and the exact rows it must return.",
+    "expect.extraSyncs": "Additional reports synced after the primary one, before the queries run (overlap behaviour)."
+  },
+  "cases": [
+    {
+      "name": "blank-enums-and-compact-dates",
+      "why": "IBKR emits attributes that do not apply to an instrument as empty strings; the gateway maps blank/unknown enum values to null (ljuti/ibkr-gateway#5) rather than the `Unknown` sentinel. Dates arrive in the statement's compact form and are normalized to ISO on ingest, while times stay verbatim — normalizing them would invent precision the statement does not carry.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "fromDate": "2026-03-01",
+        "toDate": "2026-08-31",
+        "trades": [
+          {
+            "transactionId": "e1",
+            "execId": "0001.abc",
+            "conid": "265598",
+            "symbol": "AAPL",
+            "description": "APPLE INC",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "tradeDate": "2026-03-02",
+            "tradeTime": "20260302;100000",
+            "settleDate": "2026-03-04",
+            "buySell": "BUY",
+            "openClose": "O",
+            "quantity": 100.0,
+            "price": 210.5,
+            "proceeds": -21050.0,
+            "cost": 21050.35,
+            "commission": -0.35,
+            "fifoPnlRealized": 0.0,
+            "multiplier": 1.0,
+            "putCall": null,
+            "strike": null,
+            "expiry": null,
+            "openDateTime": null,
+            "levelOfDetail": "EXECUTION",
+            "taxes": 0.0,
+            "netCash": -21050.35,
+            "mtmPnl": null,
+            "fxRateToBase": 1.25,
+            "ibOrderId": "42",
+            "underlyingSymbol": null,
+            "underlyingConid": null,
+            "exchange": null
+          },
+          {
+            "transactionId": "e2",
+            "execId": "0002.def",
+            "conid": "265598",
+            "symbol": "AAPL",
+            "description": "APPLE INC",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "tradeDate": "20260828",
+            "tradeTime": "20260828;123310",
+            "settleDate": "20260831",
+            "buySell": "SELL",
+            "openClose": "C;O",
+            "quantity": -100.0,
+            "price": 215.5,
+            "proceeds": 21550.0,
+            "cost": 21050.35,
+            "commission": -0.35,
+            "fifoPnlRealized": 499.65,
+            "multiplier": 1.0,
+            "putCall": null,
+            "strike": null,
+            "expiry": null,
+            "openDateTime": null,
+            "levelOfDetail": "EXECUTION",
+            "taxes": 0.0,
+            "netCash": 21549.65,
+            "mtmPnl": null,
+            "fxRateToBase": 1.25,
+            "ibOrderId": "43",
+            "underlyingSymbol": null,
+            "underlyingConid": null,
+            "exchange": null
+          }
+        ],
+        "lots": [],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 2,
+          "lots": 0,
+          "cashTransactions": 0,
+          "skipped": 0,
+          "cashDated": 0
+        },
+        "payload": [
+          { "path": "trades.0.putCall", "equals": null },
+          { "path": "trades.0.tradeTime", "equals": "20260302;100000" },
+          { "path": "trades.1.openClose", "equals": "C;O" },
+          { "path": "trades.1.tradeDate", "equals": "20260828" }
+        ],
+        "queries": [
+          {
+            "sql": "SELECT trade_date, trade_time FROM executions WHERE transaction_id = 'e2'",
+            "rows": [["2026-08-28", "20260828;123310"]]
+          },
+          {
+            "sql": "SELECT trade_date FROM executions WHERE transaction_id = 'e1'",
+            "rows": [["2026-03-02"]]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "levels-are-partitioned-and-lots-arrive-separately",
+      "why": "Flex mixes levels of detail in one array, and lots and their executions both carry realized P/L, so summing across levels double counts (ljuti/ibkr-gateway#6). The gateway puts CLOSED_LOT rows in their own `lots` array; a consumer must keep them apart from `trades` and from the summary levels, whichever array they arrive in.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [
+          {
+            "transactionId": "close-exec",
+            "conid": "495918858",
+            "symbol": "GSVR",
+            "description": "GUANAJUATO SILVER CO LTD",
+            "assetCategory": "STK",
+            "currency": "CAD",
+            "tradeDate": "2026-07-06",
+            "tradeTime": "20260706;145105",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": -500.0,
+            "price": 0.525,
+            "cost": 228.6375,
+            "commission": -1.0,
+            "fifoPnlRealized": 32.5,
+            "multiplier": 1.0,
+            "levelOfDetail": "EXECUTION"
+          },
+          {
+            "transactionId": "open-exec",
+            "conid": "495918858",
+            "symbol": "GSVR",
+            "assetCategory": "STK",
+            "currency": "CAD",
+            "tradeDate": "2026-07-06",
+            "tradeTime": "20260706;145105",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": 500.0,
+            "cost": 228.6375,
+            "fifoPnlRealized": 32.5,
+            "openDateTime": "20260608;155319",
+            "levelOfDetail": "CLOSED_LOT"
+          },
+          {
+            "transactionId": "summary-row",
+            "conid": "495918858",
+            "symbol": "GSVR",
+            "assetCategory": "STK",
+            "currency": "CAD",
+            "quantity": 10000.0,
+            "cost": 3637.0,
+            "fifoPnlRealized": 0.0,
+            "levelOfDetail": "SYMBOL_SUMMARY"
+          }
+        ],
+        "lots": [
+          {
+            "transactionId": "open-exec-2",
+            "conid": "814595107",
+            "symbol": "NEM",
+            "description": "NEWMONT CORP",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "tradeDate": "2026-08-28",
+            "tradeTime": "20260828;123310",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": 500.0,
+            "price": 1.2,
+            "cost": 155.85,
+            "fifoPnlRealized": 92.825,
+            "multiplier": 1.0,
+            "openDateTime": "20260807;120536",
+            "levelOfDetail": "CLOSED_LOT"
+          }
+        ],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 1,
+          "lots": 2,
+          "cashTransactions": 0,
+          "skipped": 1,
+          "cashDated": 0
+        },
+        "queries": [
+          { "sql": "SELECT COUNT(*) FROM executions", "rows": [[1]] },
+          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[2]] },
+          {
+            "sql": "SELECT ROUND(SUM(realized_pnl), 3) FROM round_trips",
+            "rows": [[125.325]]
+          },
+          {
+            "sql": "SELECT open_date, close_date FROM round_trips WHERE open_transaction_id = 'open-exec-2'",
+            "rows": [["2026-08-07", "2026-08-28"]]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "identical-lots-belong-to-different-closes",
+      "why": "One order can fill in several executions, and two of them can close the same quantity of the same opened lot — the lot rows are then byte-identical. They are distinct records: collapsing them by content loses real money (measured: a 365-day statement's realized total went from 321,073.25 to 313,022.24 when keyed by content alone). Consumers key a lot by its content plus how many identical rows preceded it.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [],
+        "lots": [
+          {
+            "transactionId": "open-exec",
+            "conid": "495918858",
+            "symbol": "GSVR",
+            "assetCategory": "STK",
+            "currency": "CAD",
+            "tradeDate": "2026-07-06",
+            "tradeTime": "20260706;145105",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": 500.0,
+            "cost": 238.7625,
+            "fifoPnlRealized": 22.375,
+            "multiplier": 1.0,
+            "openDateTime": "20260622;112706",
+            "levelOfDetail": "CLOSED_LOT"
+          },
+          {
+            "transactionId": "open-exec",
+            "conid": "495918858",
+            "symbol": "GSVR",
+            "assetCategory": "STK",
+            "currency": "CAD",
+            "tradeDate": "2026-07-06",
+            "tradeTime": "20260706;145105",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": 500.0,
+            "cost": 238.7625,
+            "fifoPnlRealized": 22.375,
+            "multiplier": 1.0,
+            "openDateTime": "20260622;112706",
+            "levelOfDetail": "CLOSED_LOT"
+          }
+        ],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 0,
+          "lots": 2,
+          "cashTransactions": 0,
+          "skipped": 0,
+          "cashDated": 0
+        },
+        "queries": [
+          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[2]] },
+          { "sql": "SELECT ROUND(SUM(realized_pnl), 3) FROM round_trips", "rows": [[44.75]] },
+          {
+            "sql": "SELECT quantity, cost, ROUND(realized_pnl, 3) FROM round_trips WHERE quantity = 500",
+            "rows": [[500.0, 238.7625, 22.375], [500.0, 238.7625, 22.375]]
+          },
+          {
+            "sql": "SELECT COUNT(*), COUNT(DISTINCT open_transaction_id) FROM round_trips",
+            "rows": [[2, 1]]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "cash-detail-not-summary",
+      "why": "Cash transactions are multi-level too: DETAIL rows are the movements, SUMMARY rows restate the same money per report date, and their totals are identical (measured: -39,217.59 each, -78,435.18 together). The gateway returns both and labels them (ljuti/ibkr-gateway#8); a consumer that sums the array as delivered doubles every cash flow. Movements without a transaction id have nothing to dedupe on and are counted, not guessed at.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [],
+        "lots": [],
+        "cashTransactions": [
+          {
+            "transactionId": "c1",
+            "accountId": "U1234567",
+            "transactionType": "Dividends",
+            "description": "AG CASH DIVIDEND",
+            "amount": -18.58,
+            "currency": "USD",
+            "fxRateToBase": 1.0,
+            "date": "2026-08-31",
+            "levelOfDetail": "DETAIL"
+          },
+          {
+            "transactionId": "s1",
+            "accountId": "U1234567",
+            "transactionType": "Dividends",
+            "description": "AG CASH DIVIDEND",
+            "amount": -18.58,
+            "currency": "USD",
+            "fxRateToBase": 1.0,
+            "date": "2026-08-31",
+            "levelOfDetail": "SUMMARY"
+          },
+          {
+            "transactionId": "c2",
+            "accountId": "U1234567",
+            "transactionType": "Broker Interest Received",
+            "description": "USD CREDIT INT",
+            "amount": 42.5,
+            "currency": "USD",
+            "fxRateToBase": 1.0,
+            "date": null,
+            "levelOfDetail": "DETAIL"
+          },
+          {
+            "accountId": "U1234567",
+            "transactionType": "Other Fees",
+            "description": "OPRA PRO",
+            "amount": -1.0,
+            "currency": "USD",
+            "date": "2026-08-31",
+            "levelOfDetail": "DETAIL"
+          }
+        ]
+      },
+      "expect": {
+        "ingest": {
+          "executions": 0,
+          "lots": 0,
+          "cashTransactions": 2,
+          "skipped": 2,
+          "cashDated": 1
+        },
+        "queries": [
+          { "sql": "SELECT COUNT(*) FROM cash_transactions", "rows": [[2]] },
+          { "sql": "SELECT ROUND(SUM(amount), 2) FROM cash_transactions", "rows": [[23.92]] },
+          {
+            "sql": "SELECT COUNT(*) FROM cash_transactions WHERE date IS NULL",
+            "rows": [[1]]
+          },
+          {
+            "sql": "SELECT currency, ROUND(amount, 2) FROM cash_by_type WHERE type = 'Broker Interest Received'",
+            "rows": [["USD", 42.5]]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "a-zero-price-close-is-not-dropped",
+      "why": "Assignments and expirations arrive as closing executions with a zero price and the realized P/L in fifoPnlRealized. Normalizing trades to {side, quantity, price} and discarding non-positive prices (a shape other Flex consumers use) silently loses them; the close is also what makes a position's round trip complete.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [
+          {
+            "transactionId": "o1",
+            "conid": "864356869",
+            "symbol": "AEM 260918C00205000",
+            "assetCategory": "OPT",
+            "currency": "USD",
+            "tradeDate": "2026-08-28",
+            "buySell": "BUY",
+            "openClose": "O",
+            "quantity": 1.0,
+            "price": 20.5,
+            "cost": 2050.0,
+            "commission": -1.0,
+            "fifoPnlRealized": 0.0,
+            "multiplier": 100.0,
+            "strike": 205.0,
+            "expiry": "2026-09-18",
+            "putCall": "C",
+            "levelOfDetail": "EXECUTION"
+          },
+          {
+            "transactionId": "c1",
+            "conid": "864356869",
+            "symbol": "AEM 260918C00205000",
+            "assetCategory": "OPT",
+            "currency": "USD",
+            "tradeDate": "2026-09-18",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": -10.0,
+            "price": 0.0,
+            "cost": 2050.0,
+            "commission": 0.0,
+            "fifoPnlRealized": -2050.0,
+            "multiplier": 100.0,
+            "strike": 205.0,
+            "expiry": "2026-09-18",
+            "putCall": "C",
+            "levelOfDetail": "EXECUTION"
+          }
+        ],
+        "lots": [],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 2,
+          "lots": 0,
+          "cashTransactions": 0,
+          "skipped": 0,
+          "cashDated": 0
+        },
+        "queries": [
+          { "sql": "SELECT COUNT(*) FROM executions WHERE price = 0", "rows": [[1]] },
+          {
+            "sql": "SELECT ROUND(SUM(realized_pnl), 2) FROM executions WHERE open_close = 'C'",
+            "rows": [[-2050.0]]
+          },
+          {
+            "sql": "SELECT strike, put_call, expiry FROM executions WHERE transaction_id = 'c1'",
+            "rows": [[205.0, "C", "2026-09-18"]]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "overlapping-reports-converge",
+      "why": "Report windows overlap (a 30-day window sits inside a yearly one), so the same execution and the same lot arrive twice. Rows are keyed by IB transaction id (executions) and by lot content plus ordinal (lots), so the second report adds only what the first did not have.",
+      "report": "wide-window",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [
+          {
+            "transactionId": "shared-exec",
+            "conid": "265598",
+            "symbol": "AAPL",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "tradeDate": "2026-08-28",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": -10.0,
+            "price": 215.5,
+            "fifoPnlRealized": 50.0,
+            "levelOfDetail": "EXECUTION"
+          }
+        ],
+        "lots": [
+          {
+            "transactionId": "shared-open",
+            "conid": "265598",
+            "symbol": "AAPL",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "tradeDate": "2026-08-28",
+            "tradeTime": "20260828;123310",
+            "buySell": "SELL",
+            "openClose": "C",
+            "quantity": 10.0,
+            "cost": 2105.0,
+            "fifoPnlRealized": 50.0,
+            "multiplier": 1.0,
+            "openDateTime": "20260302;100000",
+            "levelOfDetail": "CLOSED_LOT"
+          }
+        ],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 1,
+          "lots": 1,
+          "cashTransactions": 0,
+          "skipped": 0,
+          "cashDated": 0
+        },
+        "extraSyncs": [
+          {
+            "report": "narrow-window",
+            "raw": {
+              "accountId": "U1234567",
+              "trades": [
+                {
+                  "transactionId": "shared-exec",
+                  "conid": "265598",
+                  "symbol": "AAPL",
+                  "assetCategory": "STK",
+                  "currency": "USD",
+                  "tradeDate": "2026-08-28",
+                  "buySell": "SELL",
+                  "openClose": "C",
+                  "quantity": -10.0,
+                  "price": 215.5,
+                  "fifoPnlRealized": 50.0,
+                  "levelOfDetail": "EXECUTION"
+                },
+                {
+                  "transactionId": "newer-exec",
+                  "conid": "265598",
+                  "symbol": "AAPL",
+                  "assetCategory": "STK",
+                  "currency": "USD",
+                  "tradeDate": "2026-09-04",
+                  "buySell": "BUY",
+                  "openClose": "O",
+                  "quantity": 5.0,
+                  "price": 220.0,
+                  "fifoPnlRealized": 0.0,
+                  "levelOfDetail": "EXECUTION"
+                }
+              ],
+              "lots": [
+                {
+                  "transactionId": "shared-open",
+                  "conid": "265598",
+                  "symbol": "AAPL",
+                  "assetCategory": "STK",
+                  "currency": "USD",
+                  "tradeDate": "2026-08-28",
+                  "tradeTime": "20260828;123310",
+                  "buySell": "SELL",
+                  "openClose": "C",
+                  "quantity": 10.0,
+                  "cost": 2105.0,
+                  "fifoPnlRealized": 50.0,
+                  "multiplier": 1.0,
+                  "openDateTime": "20260302;100000",
+                  "levelOfDetail": "CLOSED_LOT"
+                }
+              ],
+              "cashTransactions": []
+            }
+          }
+        ],
+        "queries": [
+          { "sql": "SELECT COUNT(*) FROM executions", "rows": [[2]] },
+          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[1]] },
+          { "sql": "SELECT COUNT(*) FROM sync_state", "rows": [[2]] }
+        ]
+      }
+    }
+  ]
+}
