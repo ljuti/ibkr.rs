@@ -1,6 +1,6 @@
 # ibkr.rs
 
-CLI client for the [IBKR gateway](../ibkr-gateway) — the service that owns the
+CLI client for the [IBKR gateway](https://github.com/ljuti/ibkr-gateway) — the service that owns the
 single connection to TWS / IB Gateway and exposes it as an authenticated JSON
 API (REST for request/response operations, WebSocket for streaming).
 
@@ -91,7 +91,8 @@ environment variables below still work and still win over the file, which is
 what CI and throwaway shells usually want. The gateway must be running first —
 the two ways to get one:
 
-**A. Gateway in the devcontainer stack** (needs the sibling repo checked out at
+**A. Gateway in the devcontainer stack** (needs
+[ljuti/ibkr-gateway](https://github.com/ljuti/ibkr-gateway) checked out at
 `../ibkr-gateway`):
 
 ```bash

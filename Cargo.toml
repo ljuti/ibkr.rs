@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 description = "CLI client for the IBKR gateway (REST + WebSocket)"
 license = "MIT"
+repository = "https://github.com/ljuti/ibkr.rs"
 publish = false
 
 [dependencies]
