@@ -6,7 +6,7 @@ use rusqlite::{Connection, named_params};
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::types::{CashTransaction, FlexReportResponse, Trade, flex_date};
+use crate::types::{FlexReportResponse, Trade, flex_date};
 
 /// What one report contributed to the store.
 #[derive(Debug, Clone, Serialize)]
@@ -307,19 +307,7 @@ fn insert_trades(
 
 /// Cash rows are multi-level too: `DETAIL` rows are the movements, and
 /// `SUMMARY` rows aggregate the same money per report date. Only detail rows
-/// are stored, and a summary row is recognisable two ways — by its level, or,
-/// on gateways that do not send the level yet, by having no transaction id.
-fn is_cash_detail(cash: &CashTransaction) -> bool {
-    match cash.level_of_detail.as_deref().map(str::trim) {
-        Some(level) if !level.is_empty() => level.eq_ignore_ascii_case("DETAIL"),
-        _ => cash
-            .transaction_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty()),
-    }
-}
-
-/// Cash transactions (dividends, fees, interest, transfers).
+/// are stored (see [`CashTransaction::is_detail`]).
 fn insert_cash(
     transaction: &rusqlite::Transaction<'_>,
     report: &str,
@@ -335,7 +323,7 @@ fn insert_cash(
             .filter(|id| !id.is_empty());
         // A summary row, or a detail row with nothing to dedupe on: counted,
         // not guessed at.
-        let Some(transaction_id) = identified.filter(|_| is_cash_detail(cash)) else {
+        let Some(transaction_id) = identified.filter(|_| cash.is_detail()) else {
             stats.skipped += 1;
             continue;
         };
@@ -777,6 +765,27 @@ mod tests {
         assert_eq!(rows.rows[0][0], rusqlite::types::Value::Integer(1));
         assert_eq!(rows.rows[0][1], rusqlite::types::Value::Real(42.5));
         cleanup(&path);
+    }
+
+    #[test]
+    fn cash_detail_rule_prefers_the_level_over_the_transaction_id() {
+        let mut summary_with_id = cash("s1");
+        summary_with_id.level_of_detail = Some("SUMMARY".to_owned());
+        assert!(
+            !summary_with_id.is_detail(),
+            "a labelled summary is not a movement"
+        );
+        let mut detail_without_id = cash("c2");
+        detail_without_id.transaction_id = None;
+        assert!(
+            detail_without_id.is_detail(),
+            "a labelled detail stays a movement"
+        );
+        let mut unlabelled = cash("c3");
+        unlabelled.level_of_detail = None;
+        assert!(unlabelled.is_detail());
+        unlabelled.transaction_id = None;
+        assert!(!unlabelled.is_detail(), "no level, no id: nothing to store");
     }
 
     #[test]

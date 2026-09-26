@@ -18,7 +18,7 @@ use crate::cli::RenderMode;
 use crate::client::Conditional;
 use crate::error::Result;
 use crate::types::{
-    AccountSummaryValue, AckResponse, BracketOrderIdsResponse, CancelResponse,
+    AccountSummaryValue, AckResponse, BracketOrderIdsResponse, CancelResponse, CashTransaction,
     ContractDetailsResponse, ExecutionResponse, FlexConfigResponse, FlexReportResponse, Health,
     HistoricalDataResponse, OrderIdResponse, OrderResponse, PnLResponse, PositionResponse,
     SnapshotEnvelope, SymbolSearchResponse, Trade,
@@ -551,6 +551,7 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
             if mode.output == crate::cli::Output::Json {
                 return json(value);
             }
+
             note(&format!(
                 "trades ({} rows, account {} from {} to {})",
                 value.trades.len(),
@@ -558,90 +559,128 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
                 opt_text(value.from_date.as_deref()),
                 opt_text(value.to_date.as_deref())
             ));
-            let mut trades = Table::new(&[
-                "tradeDate",
-                "symbol",
-                "buySell",
-                "quantity",
-                "price",
-                "proceeds",
-                "commission",
-                "currency",
-            ]);
-            for trade in &value.trades {
-                trades.push(vec![
-                    opt_text(trade.trade_date.as_deref()),
-                    opt_text(trade.symbol.as_deref()),
-                    opt_text(trade.buy_sell.as_deref()),
-                    opt_number(trade.quantity),
-                    opt_number(trade.price),
-                    opt_number(trade.proceeds),
-                    opt_number(trade.commission),
-                    opt_text(trade.currency.as_deref()),
-                ]);
-            }
-            print_table(&trades, mode)?;
+            print_table(&trades_table(value), mode)?;
 
-            // Round trips: closed lots are the exact pairing — opening
-            // execution, close, matched quantity, cost basis, realized P/L.
-            // Without them, closing executions are the best available source:
-            // they carry the realized figure but rarely an open date.
-            let (label, closed): (&str, Vec<&Trade>) = if value.lots.is_empty() {
-                (
-                    "closed trades",
-                    value
-                        .trades
-                        .iter()
-                        .filter(|trade| closes_position(trade))
-                        .collect(),
-                )
-            } else {
-                ("closed lots", value.lots.iter().collect())
-            };
+            let (label, closed) = round_trips(value);
             note(&format!("{label} ({} rows)", closed.len()));
-            let mut realized = Table::new(&[
-                "closed", "opened", "symbol", "expiry", "right", "strike", "quantity", "cost",
-                "pnl", "currency",
-            ]);
-            for trade in closed {
-                realized.push(vec![
-                    opt_text(trade.trade_date.as_deref()),
-                    date_part(trade.open_date_time.as_deref()),
-                    opt_text(trade.symbol.as_deref()),
-                    opt_text(trade.expiry.as_deref()),
-                    enum_text(trade.put_call.as_deref()),
-                    opt_number(trade.strike),
-                    opt_number(trade.quantity),
-                    opt_number(trade.cost),
-                    opt_number(trade.fifo_pnl_realized),
-                    opt_text(trade.currency.as_deref()),
-                ]);
-            }
-            print_table(&realized, mode)?;
+            print_table(&round_trips_table(&closed), mode)?;
 
-            note(&format!(
-                "cash transactions ({} rows)",
-                value.cash_transactions.len()
-            ));
-            let mut cash = Table::new(&[
-                "date",
-                "transactionType",
-                "amount",
-                "currency",
-                "description",
-            ]);
-            for transaction in &value.cash_transactions {
-                cash.push(vec![
-                    opt_text(transaction.date.as_deref()),
-                    opt_text(transaction.transaction_type.as_deref()),
-                    opt_number(transaction.amount),
-                    opt_text(transaction.currency.as_deref()),
-                    opt_text(transaction.description.as_deref()),
-                ]);
+            let (detail, summaries) = cash_detail_rows(value);
+            if summaries == 0 {
+                note(&format!("cash transactions ({} rows)", detail.len()));
+            } else {
+                note(&format!(
+                    "cash transactions ({} rows, {summaries} summary rows omitted)",
+                    detail.len()
+                ));
             }
-            print_table(&cash, mode)
+            print_table(&cash_table(&detail), mode)
         }
     }
+}
+
+/// Every execution in the report.
+fn trades_table(value: &FlexReportResponse) -> Table {
+    let mut trades = Table::new(&[
+        "tradeDate",
+        "symbol",
+        "buySell",
+        "quantity",
+        "price",
+        "proceeds",
+        "commission",
+        "currency",
+    ]);
+    for trade in &value.trades {
+        trades.push(vec![
+            opt_text(trade.trade_date.as_deref()),
+            opt_text(trade.symbol.as_deref()),
+            opt_text(trade.buy_sell.as_deref()),
+            opt_number(trade.quantity),
+            opt_number(trade.price),
+            opt_number(trade.proceeds),
+            opt_number(trade.commission),
+            opt_text(trade.currency.as_deref()),
+        ]);
+    }
+    trades
+}
+
+/// Rows and label for the round-trip projection.
+///
+/// Closed lots are the exact pairing — opening execution, close, matched
+/// quantity, cost basis, realized P/L. Without them, closing executions are the
+/// best available source: they carry the realized figure but rarely an open
+/// date.
+fn round_trips(value: &FlexReportResponse) -> (&'static str, Vec<&Trade>) {
+    if value.lots.is_empty() {
+        (
+            "closed trades",
+            value
+                .trades
+                .iter()
+                .filter(|trade| closes_position(trade))
+                .collect(),
+        )
+    } else {
+        ("closed lots", value.lots.iter().collect())
+    }
+}
+
+fn round_trips_table(closed: &[&Trade]) -> Table {
+    let mut table = Table::new(&[
+        "closed", "opened", "symbol", "expiry", "right", "strike", "quantity", "cost", "pnl",
+        "currency",
+    ]);
+    for trade in closed {
+        table.push(vec![
+            opt_text(trade.trade_date.as_deref()),
+            date_part(trade.open_date_time.as_deref()),
+            opt_text(trade.symbol.as_deref()),
+            opt_text(trade.expiry.as_deref()),
+            enum_text(trade.put_call.as_deref()),
+            opt_number(trade.strike),
+            opt_number(trade.quantity),
+            opt_number(trade.cost),
+            opt_number(trade.fifo_pnl_realized),
+            opt_text(trade.currency.as_deref()),
+        ]);
+    }
+    table
+}
+
+/// Cash movements, and how many summary rows were left out.
+///
+/// The gateway returns both levels; a summary row restates the same money per
+/// report date, so printing both invites a double count.
+fn cash_detail_rows(value: &FlexReportResponse) -> (Vec<&CashTransaction>, usize) {
+    let detail: Vec<&CashTransaction> = value
+        .cash_transactions
+        .iter()
+        .filter(|transaction| transaction.is_detail())
+        .collect();
+    let summaries = value.cash_transactions.len() - detail.len();
+    (detail, summaries)
+}
+
+fn cash_table(detail: &[&CashTransaction]) -> Table {
+    let mut cash = Table::new(&[
+        "date",
+        "transactionType",
+        "amount",
+        "currency",
+        "description",
+    ]);
+    for transaction in detail {
+        cash.push(vec![
+            opt_text(transaction.date.as_deref()),
+            opt_text(transaction.transaction_type.as_deref()),
+            opt_number(transaction.amount),
+            opt_text(transaction.currency.as_deref()),
+            opt_text(transaction.description.as_deref()),
+        ]);
+    }
+    cash
 }
 
 /// Note the size of a bounded snapshot.

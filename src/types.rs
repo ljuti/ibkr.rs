@@ -762,6 +762,23 @@ pub struct CashTransaction {
     pub level_of_detail: Option<String>,
 }
 
+impl CashTransaction {
+    /// Whether this row is an individual movement rather than an aggregate of
+    /// the same money. The gateway returns both levels, so anything that adds
+    /// up cash must ask first.
+    pub(crate) fn is_detail(&self) -> bool {
+        match self.level_of_detail.as_deref().map(str::trim) {
+            Some(level) if !level.is_empty() => level.eq_ignore_ascii_case("DETAIL"),
+            // Gateways that predate `levelOfDetail` on cash: the summary rows
+            // are the ones without a transaction id.
+            _ => self
+                .transaction_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()),
+        }
+    }
+}
+
 /// Normalize a Flex date-time to an ISO date, `None` when it carries none.
 ///
 /// Flex separates date and time inconsistently and emits compact dates —

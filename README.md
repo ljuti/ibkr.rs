@@ -224,6 +224,12 @@ Without lots it falls back to closing executions, where `opened` is `-`
 whenever IBKR leaves `openDateTime` empty at execution level (observed on all
 4,848 executions of a real 365-day statement).
 
+`-o json` prints the payload as delivered, which for cash means **both**
+levels: filter on `levelOfDetail` (`DETAIL` is the movements, `SUMMARY`
+restates the same money per report date) or on `transactionId` being present
+before summing. The `table` mode shows the movements and reports how many
+summary rows it left out.
+
 `trades` and `lots` are separate arrays in the payload and stay separate
 everywhere: a lot and its execution both carry `fifoPnlRealized`, so summing
 them double counts
