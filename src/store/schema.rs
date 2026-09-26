@@ -17,7 +17,7 @@
 //!   (`fifoPnlRealized`), not something recomputed here.
 
 /// Schema version recorded in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Steps that bring an older store forward, applied in order before the DDL.
 ///
@@ -35,6 +35,10 @@ pub(super) const MIGRATIONS: &[(i32, &str)] = &[
     // the reports again, because a payload cached before the gateway mapped
     // those sections cannot fill them.
     (3, "DELETE FROM sync_state;"),
+    // Schema 4 rebuilds the cash reconciliation view: the first version
+    // compared the balance change against the store's cash transactions, which
+    // are only the itemised ones. Views are cheap to recreate and hold no data.
+    (4, "DROP VIEW IF EXISTS cash_reconciliation;"),
 ];
 
 /// Applied on every open; every statement is idempotent.
@@ -209,6 +213,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     cash_transactions INTEGER NOT NULL DEFAULT 0,
     skipped           INTEGER NOT NULL DEFAULT 0,
     positions         INTEGER NOT NULL DEFAULT 0,
+    position_open_dates INTEGER NOT NULL DEFAULT 0,
     cash_report       INTEGER NOT NULL DEFAULT 0,
     synced_at         TEXT NOT NULL
 );
@@ -270,34 +275,53 @@ CREATE VIEW IF NOT EXISTS unrealized_pnl AS
     GROUP BY report, currency, asset_category
     ORDER BY unrealized DESC;
 
--- Does the cash add up? The report's own balance change against the movements
--- the store holds for that report and currency, with `unexplained` as the
--- difference. `BASE_SUMMARY` compares the base-currency change against movements
--- converted with each row's own `fx_rate_to_base`, so it is as good as the
--- statement's rates and no better.
+-- Does the cash add up? `reported_movements` is IBKR's own cash-report
+-- breakdown summed across categories (`deposit_withdrawals` is used rather than
+-- `deposits` plus `withdrawals`, which would count the same money twice), and
+-- `unexplained` is whatever the breakdown does not account for — visible rather
+-- than hidden. Per-currency rows reconcile on real statements; the
+-- `BASE_SUMMARY` row does not, because its categories are a different mix rather
+-- than a converted sum, so reconcile in the currency you care about. `itemised_movements` is what the store holds as individual cash
+-- transactions, which is a subset by construction: buying a stock moves cash
+-- through `net_trades_purchases`, and it is a trade, not a cash transaction.
 CREATE VIEW IF NOT EXISTS cash_reconciliation AS
-    SELECT b.report, b.currency, b.starting_cash, b.ending_cash,
-           ROUND(b.ending_cash - b.starting_cash, 2) AS balance_change,
+    SELECT report, currency, starting_cash, ending_cash,
+           ROUND(ending_cash - starting_cash, 2) AS balance_change,
+           ROUND(
+               IFNULL(commissions, 0) + IFNULL(deposit_withdrawals, 0)
+               + IFNULL(dividends, 0) + IFNULL(broker_interest, 0)
+               + IFNULL(bond_interest, 0) + IFNULL(withholding_tax, 0)
+               + IFNULL(other_fees, 0) + IFNULL(client_fees, 0)
+               + IFNULL(broker_fees, 0) + IFNULL(net_trades_sales, 0)
+               + IFNULL(net_trades_purchases, 0) + IFNULL(account_transfers, 0)
+               + IFNULL(internal_transfers, 0) + IFNULL(external_transfers, 0)
+               + IFNULL(fx_translation_pnl, 0) + IFNULL(realized_forex_pnl, 0)
+               + IFNULL(cash_settling_mtm, 0) + IFNULL(linking_adjustments, 0)
+               + IFNULL(transaction_tax, 0) + IFNULL(payment_in_lieu, 0)
+               + IFNULL(billable_sales_tax, 0) + IFNULL(other_income, 0), 2) AS reported_movements,
+           ROUND(ending_cash - starting_cash - (
+               IFNULL(commissions, 0) + IFNULL(deposit_withdrawals, 0)
+               + IFNULL(dividends, 0) + IFNULL(broker_interest, 0)
+               + IFNULL(bond_interest, 0) + IFNULL(withholding_tax, 0)
+               + IFNULL(other_fees, 0) + IFNULL(client_fees, 0)
+               + IFNULL(broker_fees, 0) + IFNULL(net_trades_sales, 0)
+               + IFNULL(net_trades_purchases, 0) + IFNULL(account_transfers, 0)
+               + IFNULL(internal_transfers, 0) + IFNULL(external_transfers, 0)
+               + IFNULL(fx_translation_pnl, 0) + IFNULL(realized_forex_pnl, 0)
+               + IFNULL(cash_settling_mtm, 0) + IFNULL(linking_adjustments, 0)
+               + IFNULL(transaction_tax, 0) + IFNULL(payment_in_lieu, 0)
+               + IFNULL(billable_sales_tax, 0) + IFNULL(other_income, 0)), 2) AS unexplained,
            ROUND((
                SELECT IFNULL(SUM(
-                   CASE WHEN b.currency = 'BASE_SUMMARY'
+                   CASE WHEN r.currency = 'BASE_SUMMARY'
                         THEN c.amount * IFNULL(c.fx_rate_to_base, 1)
                         ELSE c.amount END), 0)
                FROM cash_transactions AS c
-               WHERE c.report = b.report
-                 AND (b.currency = 'BASE_SUMMARY' OR c.currency = b.currency)
-           ), 2) AS movements,
-           ROUND(b.ending_cash - b.starting_cash - (
-               SELECT IFNULL(SUM(
-                   CASE WHEN b.currency = 'BASE_SUMMARY'
-                        THEN c.amount * IFNULL(c.fx_rate_to_base, 1)
-                        ELSE c.amount END), 0)
-               FROM cash_transactions AS c
-               WHERE c.report = b.report
-                 AND (b.currency = 'BASE_SUMMARY' OR c.currency = b.currency)
-           ), 2) AS unexplained
-    FROM cash_report AS b
-    ORDER BY b.report, b.currency;
+               WHERE c.report = r.report
+                 AND (r.currency = 'BASE_SUMMARY' OR c.currency = r.currency)
+           ), 2) AS itemised_movements
+    FROM cash_report AS r
+    ORDER BY r.report, r.currency;
 
 -- Exact round trips: opening execution, close, matched quantity, cost basis and
 -- realized P/L. Empty until the gateway returns CLOSED_LOT rows.

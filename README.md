@@ -333,15 +333,34 @@ Views answer the usual questions with the broker's own numbers:
 | `cash_by_type` | dividends, withholding, fees, interest, transfers |
 | `positions` | the statement's own open-position snapshot, with `open_date` and the execution that opened each one |
 | `unrealized_pnl` | mark-to-market per report, currency and asset class |
-| `cash_reconciliation` | each report's balance change against the movements stored beside it, with the difference as `unexplained` |
+| `cash_reconciliation` | each report's balance change against IBKR's own cash breakdown (`reported_movements`), with `unexplained` as the difference and `itemised_movements` as what the store holds as individual transactions |
 | `open_positions` | net position per contract, derived from executions — a fallback for reports that carry no snapshot |
 | `round_trips` | opening execution ↔ close, quantity, cost basis, realized P/L (from the statement's closed lots) |
+
+`cash_reconciliation` reconciles against the statement's own breakdown because
+that is what balances: on live data the per-currency rows come out exact (AUD,
+CAD, GBP and USD at `unexplained = 0`, EUR with an −80.26 residual), while the
+store's itemised cash transactions are a subset by construction — a stock
+purchase moves cash through `net_trades_purchases` and is a trade, not a cash
+transaction. The `BASE_SUMMARY` row does **not** reconcile: its categories are a
+different mix rather than a converted sum, so reconcile per currency and treat
+the base row as a total. `unexplained` is reported rather than hidden, which is
+how the EUR residual and the base row's behaviour were found.
+
+The statement's own positions are worth having for another reason, measured on
+live data: the derived `open_positions` view (executions inside the window)
+agreed with that snapshot for **20 of 76** contracts on a 30-day window, and for
+71 of 80 on a year-long window *with* a coverage heuristic. A window can only
+explain positions whose history it contains, which is why the snapshot is now
+the answer and the derivation is labelled a fallback.
 
 What the store can answer depends on which Flex sections the query asks for, and
 `store status` says which are missing: **Trades** (executions), **Closed Lots**
 (exact round trips), **Cash Transactions** (movements), **Open Positions** (the
-statement's own positions, including when each one was opened) and **Cash
-Report** (balances, so movements can be reconciled). Positions are a snapshot at
+statement's own positions — tick **Open Date Time** and **Originating
+Transaction ID** inside that section too, or the rows arrive without dates, and
+`store status` will say so) and **Cash Report** (balances, so cash can be
+reconciled). Positions are a snapshot at
 the report date rather than a history, so a position history comes from syncing
 several windows.
 

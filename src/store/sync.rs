@@ -30,6 +30,8 @@ pub struct SyncStats {
     pub cash_dated: usize,
     /// Open positions stored.
     pub positions: usize,
+    /// Those carrying an open date (IBKR only fills it when the query asks).
+    pub position_open_dates: usize,
     /// Currency rows stored from the cash report.
     pub cash_report: usize,
     /// `ETag` the payload arrived with.
@@ -99,10 +101,10 @@ const CASH_INSERT: &str = "
 const SYNC_STATE_UPSERT: &str = "
     INSERT INTO sync_state (
         report, from_date, to_date, etag, executions, lots, cash_transactions, skipped,
-        positions, cash_report, synced_at
+        positions, position_open_dates, cash_report, synced_at
     ) VALUES (
         :report, :from_date, :to_date, :etag, :executions, :lots, :cash_transactions, :skipped,
-        :positions, :cash_report, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        :positions, :position_open_dates, :cash_report, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
     )
     ON CONFLICT (report) DO UPDATE SET
         from_date = excluded.from_date,
@@ -113,6 +115,7 @@ const SYNC_STATE_UPSERT: &str = "
         cash_transactions = excluded.cash_transactions,
         skipped = excluded.skipped,
         positions = excluded.positions,
+        position_open_dates = excluded.position_open_dates,
         cash_report = excluded.cash_report,
         synced_at = excluded.synced_at";
 
@@ -143,6 +146,7 @@ pub(super) fn upsert(
         skipped: 0,
         cash_dated: 0,
         positions: 0,
+        position_open_dates: 0,
         cash_report: 0,
         etag: etag.map(str::to_owned),
     };
@@ -446,6 +450,13 @@ fn insert_positions(
             ":level_of_detail": position.level_of_detail,
             ":report_date": as_date(position.report_date.as_deref()),
         })?;
+        if position
+            .open_date_time
+            .as_deref()
+            .is_some_and(|open| !open.trim().is_empty())
+        {
+            stats.position_open_dates += 1;
+        }
         stats.positions += 1;
     }
     Ok(())
@@ -522,6 +533,7 @@ fn record_sync_state(transaction: &rusqlite::Transaction<'_>, stats: &SyncStats)
             ":cash_transactions": count(stats.cash_transactions),
             ":skipped": count(stats.skipped),
             ":positions": count(stats.positions),
+            ":position_open_dates": count(stats.position_open_dates),
             ":cash_report": count(stats.cash_report),
         },
     )?;

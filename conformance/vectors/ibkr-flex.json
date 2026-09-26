@@ -683,7 +683,7 @@
     },
     {
       "name": "positions-and-balances-are-a-snapshot",
-      "why": "Open Positions is a snapshot at the report date, not a windowed history, and it is the only place a consumer learns when an *open* position was opened: each row carries openDateTime and originatingTransactionId, the open half of a round trip that closed-lots rows can only give for trades that already closed. Cash Report is what makes cash movements reconcilable — a balance change to check them against (ljuti/ibkr-gateway#10). Both sections are empty when the query does not request them, which is not the same as 'no positions'.",
+      "why": "Open Positions is a snapshot at the report date, not a windowed history, and it is the only place a consumer learns when an *open* position was opened: each row carries openDateTime and originatingTransactionId, the open half of a round trip that closed-lots rows can only give for trades that already closed. Cash Report is what makes cash reconcilable — a balance change plus IBKR's own breakdown, which sums exactly to it, while the itemised movements the store holds are a subset (a stock purchase moves cash through net_trades_purchases and is a trade, not a cash transaction) (ljuti/ibkr-gateway#10). Both sections are empty when the query does not request them, which is not the same as 'no positions'.",
       "report": "vector",
       "raw": {
         "accountId": "U1234567",
@@ -721,7 +721,8 @@
             "toDate": "2026-03-31",
             "startingCash": 1000.0,
             "endingCash": 980.0,
-            "endingSettledCash": 980.0
+            "endingSettledCash": 980.0,
+            "otherFees": -20.0
           },
           {
             "currency": "BASE_SUMMARY",
@@ -729,7 +730,8 @@
             "toDate": "2026-03-31",
             "startingCash": 1000.0,
             "endingCash": 980.0,
-            "endingSettledCash": 980.0
+            "endingSettledCash": 980.0,
+            "otherFees": -20.0
           }
         ],
         "cashTransactions": [
@@ -793,15 +795,66 @@
             ]
           },
           {
-            "sql": "SELECT currency, ROUND(balance_change, 2), ROUND(unexplained, 2) FROM cash_reconciliation ORDER BY currency",
+            "sql": "SELECT currency, ROUND(balance_change, 2), ROUND(reported_movements, 2), ROUND(unexplained, 2), ROUND(itemised_movements, 2) FROM cash_reconciliation ORDER BY currency",
             "rows": [
               [
                 "BASE_SUMMARY",
                 -20.0,
-                0.0
+                -20.0,
+                0.0,
+                -20.0
               ],
               [
                 "USD",
+                -20.0,
+                -20.0,
+                0.0,
+                -20.0
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "cash-that-does-not-add-up-is-reported",
+      "why": "The reconciliation reports what the statement's own breakdown fails to account for instead of assuming the books balance. A cash report whose categories are missing shows the whole change as `unexplained`, which is a fact about the report rather than a silently wrong total.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [],
+        "lots": [],
+        "positions": [],
+        "cashReport": [
+          {
+            "currency": "USD",
+            "fromDate": "2026-03-01",
+            "toDate": "2026-03-31",
+            "startingCash": 100.0,
+            "endingCash": 80.0,
+            "endingSettledCash": 80.0
+          }
+        ],
+        "cashTransactions": []
+      },
+      "expect": {
+        "ingest": {
+          "executions": 0,
+          "lots": 0,
+          "cashTransactions": 0,
+          "skipped": 0,
+          "cashDated": 0,
+          "positions": 0,
+          "cashReport": 1
+        },
+        "queries": [
+          {
+            "sql": "SELECT currency, ROUND(balance_change, 2), ROUND(reported_movements, 2), ROUND(unexplained, 2), ROUND(itemised_movements, 2) FROM cash_reconciliation",
+            "rows": [
+              [
+                "USD",
+                -20.0,
+                0.0,
                 -20.0,
                 0.0
               ]

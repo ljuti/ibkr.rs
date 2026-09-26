@@ -64,6 +64,8 @@ pub struct SyncCapabilities {
     pub cash_dates: bool,
     /// Open positions arrived, so positions need not be derived.
     pub positions: bool,
+    /// Some of those positions carry the date they were opened.
+    pub position_open_dates: bool,
     /// Cash report balances arrived, so movements can be reconciled.
     pub cash_report: bool,
 }
@@ -76,6 +78,7 @@ impl SyncCapabilities {
             cash_movements: stats.cash_transactions > 0,
             cash_dates: stats.cash_dated > 0,
             positions: stats.positions > 0,
+            position_open_dates: stats.position_open_dates > 0,
             cash_report: stats.cash_report > 0,
         };
         let mut missing = Vec::new();
@@ -86,6 +89,12 @@ impl SyncCapabilities {
         }
         if stats.cash_transactions == 0 && stats.skipped > 0 {
             missing.push("no cash movements: add the Cash Transactions section to the Flex query");
+        }
+        if stats.positions > 0 && stats.position_open_dates == 0 {
+            missing.push(
+                "positions carry no open date: tick Open Date Time (and Originating Transaction ID) \
+                 in the query's Open Positions section to date them",
+            );
         }
         if stats.positions == 0 && stats.cash_report == 0 && stats.executions > 0 {
             missing.push(
@@ -139,6 +148,8 @@ pub struct ReportStatus {
     pub skipped: i64,
     /// Open positions it contributed.
     pub positions: i64,
+    /// Those carrying an open date.
+    pub position_open_dates: i64,
     /// Currency rows it contributed from the cash report.
     pub cash_report: i64,
     /// When it was last synced.
@@ -163,6 +174,8 @@ pub struct StoreStatus {
     pub positions: i64,
     /// Currency rows stored from the cash reports.
     pub cash_report: i64,
+    /// Positions carrying an open date.
+    pub positions_dated: i64,
     /// Which analyses the stored data supports.
     pub capabilities: SyncCapabilities,
 }
@@ -331,7 +344,7 @@ impl Store {
     pub fn status(&self) -> Result<StoreStatus> {
         let mut statement = self.connection.prepare(
             "SELECT report, from_date, to_date, etag, executions, lots, cash_transactions, \
-                    skipped, positions, cash_report, synced_at \
+                    skipped, positions, position_open_dates, cash_report, synced_at \
              FROM sync_state ORDER BY report",
         )?;
         let reports: Vec<ReportStatus> = statement
@@ -346,8 +359,9 @@ impl Store {
                     cash_transactions: row.get(6)?,
                     skipped: row.get(7)?,
                     positions: row.get(8)?,
-                    cash_report: row.get(9)?,
-                    synced_at: row.get(10)?,
+                    position_open_dates: row.get(9)?,
+                    cash_report: row.get(10)?,
+                    synced_at: row.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -357,7 +371,8 @@ impl Store {
             "SELECT (SELECT COUNT(*) FROM executions), (SELECT COUNT(*) FROM closed_lots), \
                     (SELECT COUNT(*) FROM cash_transactions), \
                     (SELECT COUNT(*) FROM cash_transactions WHERE date IS NOT NULL), \
-                    (SELECT COUNT(*) FROM positions), (SELECT COUNT(*) FROM cash_report)",
+                    (SELECT COUNT(*) FROM positions), (SELECT COUNT(*) FROM cash_report), \
+                    (SELECT COUNT(*) FROM positions WHERE open_date IS NOT NULL)",
             [],
             |row| {
                 Ok((
@@ -367,10 +382,19 @@ impl Store {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )?;
-        let (executions, lots, cash_transactions, cash_dated, positions, cash_report) = counts;
+        let (
+            executions,
+            lots,
+            cash_transactions,
+            cash_dated,
+            positions,
+            cash_report,
+            positions_dated,
+        ) = counts;
         Ok(StoreStatus {
             reports,
             executions,
@@ -379,11 +403,13 @@ impl Store {
             cash_dated,
             positions,
             cash_report,
+            positions_dated,
             capabilities: SyncCapabilities {
                 round_trips: lots > 0,
                 cash_movements: cash_transactions > 0,
                 cash_dates: cash_dated > 0,
                 positions: positions > 0,
+                position_open_dates: positions_dated > 0,
                 cash_report: cash_report > 0,
             },
         })
@@ -899,6 +925,7 @@ mod tests {
             skipped: 4,
             cash_dated: 0,
             positions: 0,
+            position_open_dates: 0,
             cash_report: 0,
             etag: None,
         };
@@ -912,6 +939,7 @@ mod tests {
         stats.cash_transactions = 2;
         stats.cash_dated = 2;
         stats.positions = 4;
+        stats.position_open_dates = 4;
         stats.cash_report = 2;
         let (capabilities, hint) = SyncCapabilities::of(&stats);
         assert_eq!(
@@ -921,6 +949,7 @@ mod tests {
                 cash_movements: true,
                 cash_dates: true,
                 positions: true,
+                position_open_dates: true,
                 cash_report: true,
             }
         );
@@ -1039,24 +1068,23 @@ mod tests {
         assert_eq!(unrealized.rows[0][0], Value::Integer(2));
         assert_eq!(unrealized.rows[0][1], Value::Real(50.0));
 
-        // Cash: a currency row reconciles against its own movements exactly.
-        // The base row converts each movement with its own `fx_rate_to_base`
-        // (the fixture carries 1.25), so its `unexplained` is the conversion,
-        // not a bug — which is why the view calls it unexplained rather than
-        // claiming the books balance.
+        // Cash: the fixture's balances change by -20 and its breakdown says
+        // nothing about where that went, so the view reports the whole change
+        // as unexplained rather than hiding it. The store's own itemised
+        // movement is reported beside it.
         let reconciliation = store
-            .query("SELECT currency, ROUND(balance_change, 2), ROUND(movements, 2), ROUND(unexplained, 2) FROM cash_reconciliation ORDER BY currency")
+            .query("SELECT currency, ROUND(balance_change, 2), ROUND(reported_movements, 2), ROUND(unexplained, 2), ROUND(itemised_movements, 2) FROM cash_reconciliation ORDER BY currency")
             .unwrap();
         assert_eq!(
             reconciliation.rows[0][0],
             Value::Text("BASE_SUMMARY".to_owned())
         );
         assert_eq!(reconciliation.rows[0][1], Value::Real(-20.0));
-        assert_eq!(reconciliation.rows[0][2], Value::Real(-25.0));
-        assert_eq!(reconciliation.rows[0][3], Value::Real(5.0));
+        assert_eq!(reconciliation.rows[0][2], Value::Real(0.0));
+        assert_eq!(reconciliation.rows[0][3], Value::Real(-20.0));
+        assert_eq!(reconciliation.rows[0][4], Value::Real(-25.0));
         assert_eq!(reconciliation.rows[1][0], Value::Text("USD".to_owned()));
-        assert_eq!(reconciliation.rows[1][2], Value::Real(-20.0));
-        assert_eq!(reconciliation.rows[1][3], Value::Real(0.0));
+        assert_eq!(reconciliation.rows[1][4], Value::Real(-20.0));
 
         // Status reports both as capabilities.
         let overview = store.status().unwrap();
@@ -1080,6 +1108,7 @@ mod tests {
             skipped: 0,
             cash_dated: 1,
             positions: 0,
+            position_open_dates: 0,
             cash_report: 0,
             etag: None,
         };
@@ -1094,6 +1123,13 @@ mod tests {
         stats.cash_report = 2;
         let (capabilities, hint) = SyncCapabilities::of(&stats);
         assert!(capabilities.positions);
+        assert!(!capabilities.position_open_dates);
+        let hint = hint.expect("positions without open dates are worth flagging");
+        assert!(hint.contains("Open Date Time"), "{hint}");
+
+        stats.position_open_dates = 3;
+        let (capabilities, hint) = SyncCapabilities::of(&stats);
+        assert!(capabilities.position_open_dates);
         assert!(capabilities.cash_report);
         assert!(hint.is_none(), "{hint:?}");
     }

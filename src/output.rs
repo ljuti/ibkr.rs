@@ -818,6 +818,8 @@ pub fn store_sync(outcomes: &[crate::store::SyncOutcome], mode: RenderMode) -> R
         "executions",
         "lots",
         "cash",
+        "positions",
+        "balances",
         "skipped",
         "etag",
     ]);
@@ -831,12 +833,16 @@ pub fn store_sync(outcomes: &[crate::store::SyncOutcome], mode: RenderMode) -> R
                 stats.executions.to_string(),
                 stats.lots.to_string(),
                 stats.cash_transactions.to_string(),
+                stats.positions.to_string(),
+                stats.cash_report.to_string(),
                 stats.skipped.to_string(),
                 opt_text(stats.etag.as_deref()),
             ]),
             crate::store::SyncOutcome::NotModified { report, etag } => table.push(vec![
                 report.clone(),
                 "not modified".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
@@ -850,6 +856,8 @@ pub fn store_sync(outcomes: &[crate::store::SyncOutcome], mode: RenderMode) -> R
             crate::store::SyncOutcome::Failed { report, message } => table.push(vec![
                 report.clone(),
                 "failed".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
                 "-".to_owned(),
@@ -902,6 +910,7 @@ pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Res
         "lots",
         "cash",
         "positions",
+        "dated",
         "balances",
         "skipped",
         "synced at",
@@ -915,6 +924,7 @@ pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Res
             report.lots.to_string(),
             report.cash_transactions.to_string(),
             report.positions.to_string(),
+            report.position_open_dates.to_string(),
             report.cash_report.to_string(),
             report.skipped.to_string(),
             report.synced_at.clone(),
@@ -923,12 +933,13 @@ pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Res
     print_table(&table, mode)?;
     note(&format!(
         "store holds {} executions, {} closed lots, {} cash movements ({} dated), \
-         {} positions, {} cash balances",
+         {} positions ({} with an open date), {} cash balances",
         status.executions,
         status.lots,
         status.cash_transactions,
         status.cash_dated,
         status.positions,
+        status.positions_dated,
         status.cash_report
     ));
     for line in capability_notes(&status.capabilities) {
@@ -962,7 +973,13 @@ pub fn capability_notes(capabilities: &crate::store::SyncCapabilities) -> Vec<St
         );
     }
     if capabilities.positions {
-        lines.push("positions: from the statement's own snapshot".to_owned());
+        lines.push(if capabilities.position_open_dates {
+            "positions: from the statement's own snapshot, with open dates".to_owned()
+        } else {
+            "positions: from the statement's own snapshot, but without open dates — tick Open Date \
+             Time in the query's Open Positions section"
+                .to_owned()
+        });
     } else {
         lines.push(
             "positions: derived from executions only — add the Open Positions section to the Flex \
@@ -1276,6 +1293,7 @@ mod tests {
             cash_movements: false,
             cash_dates: false,
             positions: false,
+            position_open_dates: false,
             cash_report: false,
         };
         let lines = capability_notes(&none);
@@ -1293,6 +1311,7 @@ mod tests {
             cash_movements: true,
             cash_dates: true,
             positions: true,
+            position_open_dates: true,
             cash_report: true,
         };
         let lines = capability_notes(&all);
@@ -1307,6 +1326,7 @@ mod tests {
             cash_movements: true,
             cash_dates: false,
             positions: true,
+            position_open_dates: false,
             cash_report: true,
         };
         assert!(
