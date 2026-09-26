@@ -122,6 +122,14 @@ Precedence is flag → environment → default. Certificate defaults
 those files exist, so the client works outside this repository without extra
 config.
 
+The binary does **not** read `.env` — something has to put those values in its
+environment. A devcontainer shell already has `IBKR_GATEWAY_URL` etc. set, by
+the compose file, to the *compose* gateway (`https://ibkr-gateway:8080`) and the
+dev certificates; that shadows `.env`. Either export the file first
+(`set -a; . ./.env; set +a`), pass the flags (each has an env equivalent in the
+table below), point the shell at it once (`.env` in `~/.bashrc`), or use
+`just run <command>`, which sources `.env` for you.
+
 | Flag | Environment variable | Default |
 |------|----------------------|---------|
 | `-u, --url` | `IBKR_GATEWAY_URL` | `https://127.0.0.1:8080` |
@@ -309,6 +317,11 @@ just deny          # license/advisory/ban check (needs cargo-deny)
 
 Cargo aliases are defined in `.cargo/config.toml`: `cargo c` (check),
 `cargo t` (test), `cargo lint` (clippy, warnings as errors).
+
+`just run health` loads `.env` before running the binary, so it talks to the
+gateway `.env` names rather than the devcontainer's compose default. Plain
+`target/debug/ibkr …` uses the ambient environment: source `.env` first if you
+want the same thing.
 
 ### Devcontainer
 

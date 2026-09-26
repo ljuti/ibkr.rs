@@ -39,9 +39,27 @@ build:
 clean:
     cargo clean
 
-# Run the CLI, e.g. `just run -- health`.
+# Run the CLI with this repo's .env loaded, e.g. `just run health` or
+# `just run -- health`.
+#
+# The binary resolves configuration from flags, then the environment, then
+# defaults — it never reads .env itself, and the devcontainer's own environment
+# points at the compose gateway (`https://ibkr-gateway:8080`) with the dev
+# certificates. Sourcing .env here is what makes `just run` talk to the gateway
+# .env actually names.
+#
+# `just` forwards a `--` separator verbatim, so drop it before handing the
+# arguments to cargo; otherwise the binary sees it as its own argument.
+# The attribute is what makes `"$@"` available (and safe for arguments with
+# spaces, e.g. SQL): without it a shebang recipe receives no positional
+# arguments at all.
+[positional-arguments]
 run *args:
-    cargo run -- {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f .env ]; then set -a; . ./.env; set +a; fi
+    if [ "${1:-}" = "--" ]; then shift; fi
+    exec cargo run -- "$@"
 
 # Audit dependencies (licenses, advisories, bans).
 deny:
