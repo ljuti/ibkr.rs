@@ -210,6 +210,26 @@ ibkr flex report transactions_30d --etag '"abc123"'   # -> not modified
 ibkr flex report transactions_30d --refresh    # bypass the gateway cache
 ```
 
+The `table` mode prints three projections: every execution, the subset that
+closes a position, and the cash side. The closed-trades table is the round-trip
+view — `closed`, `opened`, `symbol`, `expiry`, `right`, `strike`, `quantity`,
+`pnl`, `currency` — where `opened` is the Flex `openDateTime` of the position
+being closed (date part only, compact `YYYYMMDD` normalized to ISO) and `pnl`
+the statement's realized FIFO P/L. Rows are selected by the statement's
+open/close indicator (`C`, or `C;O` for a close-and-reopen); an absent or blank
+indicator falls back to a non-zero realized P/L, and the `Unknown` sentinel
+`ib-flex` emits for blank enum attributes is treated as absence
+([ibkr-gateway#5](https://github.com/ljuti/ibkr-gateway/issues/5)).
+
+`opened` is `-` whenever IBKR leaves `openDateTime` empty at execution level —
+observed on all 4,848 executions of a real 365-day statement, where the open
+dates instead sit on the `CLOSED_LOT` rows that the gateway does not map yet
+([ibkr-gateway#6](https://github.com/ljuti/ibkr-gateway/issues/6)). The
+remaining trades detail — open date, level, taxes, net cash, mark-to-market
+P/L, multiplier, option identity, order/exec ids — is in the JSON payload,
+which does include the gateway's contract request tracked in
+[ibkr-gateway#3](https://github.com/ljuti/ibkr-gateway/issues/3).
+
 ## Development
 
 Host requirements: Rust (the pinned toolchain installs via rustup) and, for the
@@ -266,7 +286,8 @@ host — do not expose the container.
   subcommand, mutation classification, instrument descriptions, and a
   regression test for a positional silently shadowing the global `--token`.
 * **Rendering** — column alignment, terminal-width shrinking with elision,
-  number formatting, absent-value handling.
+  number formatting, absent-value handling, Flex close detection, enum-sentinel
+  handling and the date-time projection.
 
 Endpoint behaviour is verified against a running gateway; there is no in-repo
 gateway fixture yet.

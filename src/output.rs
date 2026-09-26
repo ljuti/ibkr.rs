@@ -21,7 +21,7 @@ use crate::types::{
     AccountSummaryValue, AckResponse, BracketOrderIdsResponse, CancelResponse,
     ContractDetailsResponse, ExecutionResponse, FlexConfigResponse, FlexReportResponse, Health,
     HistoricalDataResponse, OrderIdResponse, OrderResponse, PnLResponse, PositionResponse,
-    SnapshotEnvelope, SymbolSearchResponse,
+    SnapshotEnvelope, SymbolSearchResponse, Trade,
 };
 
 /// Smallest width a column may be shrunk to before truncation stops.
@@ -582,6 +582,34 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
             }
             print_table(&trades, mode)?;
 
+            // Closing executions are the only rows that answer "when was this
+            // opened, when was it closed, what did it realize?" — an opening
+            // row has no realized P/L and no open date to show.
+            let closed: Vec<&Trade> = value
+                .trades
+                .iter()
+                .filter(|trade| closes_position(trade))
+                .collect();
+            note(&format!("closed trades ({} rows)", closed.len()));
+            let mut realized = Table::new(&[
+                "closed", "opened", "symbol", "expiry", "right", "strike", "quantity", "pnl",
+                "currency",
+            ]);
+            for trade in closed {
+                realized.push(vec![
+                    opt_text(trade.trade_date.as_deref()),
+                    date_part(trade.open_date_time.as_deref()),
+                    opt_text(trade.symbol.as_deref()),
+                    opt_text(trade.expiry.as_deref()),
+                    enum_text(trade.put_call.as_deref()),
+                    opt_number(trade.strike),
+                    opt_number(trade.quantity),
+                    opt_number(trade.fifo_pnl_realized),
+                    opt_text(trade.currency.as_deref()),
+                ]);
+            }
+            print_table(&realized, mode)?;
+
             note(&format!(
                 "cash transactions ({} rows)",
                 value.cash_transactions.len()
@@ -610,6 +638,56 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
 /// Note the size of a bounded snapshot.
 fn envelope_note(count: usize, label: &str, truncated: bool) {
     note(&format!("{label}: {count} (truncated: {truncated})"));
+}
+
+/// A Flex enum value, or `None` when it carries no information.
+///
+/// IBKR emits attributes that do not apply to an instrument as empty strings,
+/// and the gateway passes them through `ib-flex`, whose `#[serde(other)]`
+/// variant serializes as the sentinel `Unknown`. Neither is data: `putCall` on
+/// a stock, or an open/close indicator the statement left blank.
+fn enum_value(value: Option<&str>) -> Option<&str> {
+    match value.map(str::trim) {
+        Some(text) if !text.is_empty() && text != "Unknown" => Some(text),
+        _ => None,
+    }
+}
+
+/// A Flex enum rendered for a table column, `-` when it carries no value.
+fn enum_text(value: Option<&str>) -> String {
+    enum_value(value).map_or_else(|| "-".to_owned(), str::to_owned)
+}
+
+/// Whether a Flex trade row closes (part of) a position.
+///
+/// The statement's open/close indicator is authoritative: `C` closes, `C;O`
+/// closes and reopens in one execution. A gateway that predates the indicator
+/// only reports the realized amount, so a non-zero realized P/L stands in for
+/// it there.
+fn closes_position(trade: &Trade) -> bool {
+    match enum_value(trade.open_close.as_deref()) {
+        Some(indicator) => indicator.contains('C'),
+        None => trade.fifo_pnl_realized.is_some_and(|pnl| pnl != 0.0),
+    }
+}
+
+/// The date part of a Flex date-time, `-` when absent.
+///
+/// Flex separates date and time inconsistently and emits compact dates —
+/// `20260608;155631`, `2025-01-15;100000`, `2025-01-15 10:00:00`,
+/// `2025-01-15T10:00:00` — while the tables only show the date. A compact
+/// `YYYYMMDD` is normalized to the ISO form the gateway uses for the fields it
+/// parses into dates, so `opened` and `closed` read the same way.
+fn date_part(value: Option<&str>) -> String {
+    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return "-".to_owned();
+    };
+    let date = text.split([' ', ',', ';', 'T']).next().unwrap_or(text);
+    if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) {
+        format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8])
+    } else {
+        date.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -674,5 +752,88 @@ mod tests {
         assert_eq!(number(182.43), "182.43");
         assert_eq!(number(1_200_000.0), "1200000");
         assert_eq!(number(-75.25), "-75.25");
+    }
+
+    fn trade(open_close: Option<&str>, realized: Option<f64>) -> Trade {
+        Trade {
+            transaction_id: None,
+            account_id: None,
+            conid: None,
+            symbol: None,
+            description: None,
+            asset_category: None,
+            buy_sell: None,
+            trade_date: None,
+            settle_date: None,
+            quantity: None,
+            price: None,
+            proceeds: None,
+            cost: None,
+            commission: None,
+            fifo_pnl_realized: realized,
+            currency: None,
+            exchange: None,
+            underlying_symbol: None,
+            underlying_conid: None,
+            multiplier: None,
+            strike: None,
+            expiry: None,
+            put_call: None,
+            open_close: open_close.map(str::to_owned),
+            open_date_time: None,
+            trade_time: None,
+            level_of_detail: None,
+            taxes: None,
+            net_cash: None,
+            mtm_pnl: None,
+            fx_rate_to_base: None,
+            ib_order_id: None,
+            exec_id: None,
+        }
+    }
+
+    #[test]
+    fn closed_rows_are_the_ones_with_a_closing_indicator() {
+        // The indicator decides, including the close-and-reopen spelling.
+        assert!(closes_position(&trade(Some("C"), Some(0.0))));
+        assert!(closes_position(&trade(Some("C;O"), Some(120.0))));
+        assert!(!closes_position(&trade(Some("O"), Some(0.0))));
+        assert!(!closes_position(&trade(Some("O"), Some(120.0))));
+        // Blank attributes reach the client as ib-flex's `Unknown` sentinel
+        // (IBKR emits `openCloseIndicator=""`), which is absence, not a value.
+        assert!(closes_position(&trade(Some("Unknown"), Some(120.0))));
+        assert!(!closes_position(&trade(Some("Unknown"), Some(0.0))));
+        assert!(!closes_position(&trade(Some(""), Some(0.0))));
+        // Without the indicator, only a non-zero realized amount is evidence
+        // of a close — openings report 0.00, not nothing.
+        assert!(closes_position(&trade(None, Some(0.01))));
+        assert!(!closes_position(&trade(None, Some(0.0))));
+        assert!(!closes_position(&trade(None, None)));
+    }
+
+    #[test]
+    fn enum_columns_render_absence_not_the_unknown_sentinel() {
+        assert_eq!(enum_text(Some("C")), "C");
+        assert_eq!(enum_text(Some("C;O")), "C;O");
+        assert_eq!(enum_text(Some("Unknown")), "-");
+        assert_eq!(enum_text(Some("")), "-");
+        assert_eq!(enum_text(Some("  ")), "-");
+        assert_eq!(enum_text(None), "-");
+    }
+
+    #[test]
+    fn flex_date_times_lose_their_time_part() {
+        assert_eq!(date_part(Some("2025-01-15;100000")), "2025-01-15");
+        assert_eq!(date_part(Some("2025-01-15 10:00:00")), "2025-01-15");
+        assert_eq!(date_part(Some("2025-01-15T10:00:00")), "2025-01-15");
+        assert_eq!(date_part(Some("2025-01-15")), "2025-01-15");
+        // Statements emit the compact form too; it is normalized to ISO so it
+        // lines up with the dates the gateway parses.
+        assert_eq!(date_part(Some("20260608;155631")), "2026-06-08");
+        assert_eq!(date_part(Some("20260608")), "2026-06-08");
+        assert_eq!(date_part(Some(" 20260608;155631 ")), "2026-06-08");
+        assert_eq!(date_part(Some("")), "-");
+        assert_eq!(date_part(Some("   ")), "-");
+        assert_eq!(date_part(None), "-");
     }
 }

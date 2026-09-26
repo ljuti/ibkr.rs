@@ -695,6 +695,37 @@ pub struct Trade {
     pub underlying_symbol: Option<String>,
     /// Underlying contract id.
     pub underlying_conid: Option<String>,
+    /// Contract multiplier (100 for standard equity options).
+    pub multiplier: Option<f64>,
+    /// Option strike.
+    pub strike: Option<f64>,
+    /// Option expiry (`YYYY-MM-DD`).
+    pub expiry: Option<String>,
+    /// Option right, `C` or `P`.
+    pub put_call: Option<String>,
+    /// `O` for an opening trade, `C` for a closing one, `C;O` when a single
+    /// execution closes and reopens the position.
+    pub open_close: Option<String>,
+    /// When the position this row closes was opened. Flex emits `date;time`
+    /// (or `date time`); the tables show the date part.
+    pub open_date_time: Option<String>,
+    /// Execution time within `trade_date`, when the statement carries it.
+    pub trade_time: Option<String>,
+    /// Which projection this row came from: `EXECUTION`, `CLOSED_LOT`, `ORDER`,
+    /// `SYMBOL_SUMMARY`, ...
+    pub level_of_detail: Option<String>,
+    /// Taxes on the trade.
+    pub taxes: Option<f64>,
+    /// Proceeds plus tax plus commission.
+    pub net_cash: Option<f64>,
+    /// Mark-to-market profit and loss (commissions excluded).
+    pub mtm_pnl: Option<f64>,
+    /// FX rate from the trade currency to the account's base currency.
+    pub fx_rate_to_base: Option<f64>,
+    /// IB order id.
+    pub ib_order_id: Option<String>,
+    /// IB execution id.
+    pub exec_id: Option<String>,
 }
 
 /// One cash transaction (dividend, fee, deposit, ...) from a Flex statement.
