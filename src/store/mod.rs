@@ -49,6 +49,10 @@ pub enum SyncOutcome {
 /// Closed Lots level has no exact round trips, and one without Cash
 /// Transactions has no cash movements. Saying so where the sync finishes beats
 /// a reader discovering empty views later.
+// Each field is an independent capability, reported as such in JSON and in
+// `store status`: collapsing them into a set or a bitfield would trade a
+// readable shape for a clever one.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncCapabilities {
@@ -58,6 +62,10 @@ pub struct SyncCapabilities {
     pub cash_movements: bool,
     /// Cash rows carry an event date.
     pub cash_dates: bool,
+    /// Open positions arrived, so positions need not be derived.
+    pub positions: bool,
+    /// Cash report balances arrived, so movements can be reconciled.
+    pub cash_report: bool,
 }
 
 impl SyncCapabilities {
@@ -67,6 +75,8 @@ impl SyncCapabilities {
             round_trips: stats.lots > 0,
             cash_movements: stats.cash_transactions > 0,
             cash_dates: stats.cash_dated > 0,
+            positions: stats.positions > 0,
+            cash_report: stats.cash_report > 0,
         };
         let mut missing = Vec::new();
         if stats.lots == 0 && stats.executions > 0 {
@@ -76,6 +86,12 @@ impl SyncCapabilities {
         }
         if stats.cash_transactions == 0 && stats.skipped > 0 {
             missing.push("no cash movements: add the Cash Transactions section to the Flex query");
+        }
+        if stats.positions == 0 && stats.cash_report == 0 && stats.executions > 0 {
+            missing.push(
+                "no positions or balances: add the Open Positions and Cash Report sections to the \
+                 Flex query (positions then need no derivation, and cash can be reconciled)",
+            );
         }
         let hint = (!missing.is_empty()).then(|| missing.join("; "));
         (capabilities, hint)
@@ -121,6 +137,10 @@ pub struct ReportStatus {
     pub cash_transactions: i64,
     /// Rows it contributed that the store skips (aggregates, cash summaries).
     pub skipped: i64,
+    /// Open positions it contributed.
+    pub positions: i64,
+    /// Currency rows it contributed from the cash report.
+    pub cash_report: i64,
     /// When it was last synced.
     pub synced_at: String,
 }
@@ -139,6 +159,10 @@ pub struct StoreStatus {
     pub cash_transactions: i64,
     /// Cash rows carrying an event date.
     pub cash_dated: i64,
+    /// Open positions stored (a snapshot per report).
+    pub positions: i64,
+    /// Currency rows stored from the cash reports.
+    pub cash_report: i64,
     /// Which analyses the stored data supports.
     pub capabilities: SyncCapabilities,
 }
@@ -307,7 +331,7 @@ impl Store {
     pub fn status(&self) -> Result<StoreStatus> {
         let mut statement = self.connection.prepare(
             "SELECT report, from_date, to_date, etag, executions, lots, cash_transactions, \
-                    skipped, synced_at \
+                    skipped, positions, cash_report, synced_at \
              FROM sync_state ORDER BY report",
         )?;
         let reports: Vec<ReportStatus> = statement
@@ -321,7 +345,9 @@ impl Store {
                     lots: row.get(5)?,
                     cash_transactions: row.get(6)?,
                     skipped: row.get(7)?,
-                    synced_at: row.get(8)?,
+                    positions: row.get(8)?,
+                    cash_report: row.get(9)?,
+                    synced_at: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -330,21 +356,35 @@ impl Store {
         let counts = self.connection.query_row(
             "SELECT (SELECT COUNT(*) FROM executions), (SELECT COUNT(*) FROM closed_lots), \
                     (SELECT COUNT(*) FROM cash_transactions), \
-                    (SELECT COUNT(*) FROM cash_transactions WHERE date IS NOT NULL)",
+                    (SELECT COUNT(*) FROM cash_transactions WHERE date IS NOT NULL), \
+                    (SELECT COUNT(*) FROM positions), (SELECT COUNT(*) FROM cash_report)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )?;
-        let (executions, lots, cash_transactions, cash_dated) = counts;
+        let (executions, lots, cash_transactions, cash_dated, positions, cash_report) = counts;
         Ok(StoreStatus {
             reports,
             executions,
             lots,
             cash_transactions,
             cash_dated,
+            positions,
+            cash_report,
             capabilities: SyncCapabilities {
                 round_trips: lots > 0,
                 cash_movements: cash_transactions > 0,
                 cash_dates: cash_dated > 0,
+                positions: positions > 0,
+                cash_report: cash_report > 0,
             },
         })
     }
@@ -461,13 +501,91 @@ mod tests {
         lots: Vec<Trade>,
         cash: Vec<CashTransaction>,
     ) -> FlexReportResponse {
+        payload_with_sections(trades, lots, cash, Vec::new(), Vec::new())
+    }
+
+    fn payload_with_sections(
+        trades: Vec<Trade>,
+        lots: Vec<Trade>,
+        cash: Vec<CashTransaction>,
+        positions: Vec<crate::types::FlexPosition>,
+        cash_report: Vec<crate::types::CashReportCurrency>,
+    ) -> FlexReportResponse {
         FlexReportResponse {
             account_id: Some("U1".to_owned()),
             from_date: Some("2026-03-01".to_owned()),
             to_date: Some("2026-03-31".to_owned()),
             trades,
             lots,
+            positions,
+            cash_report,
             cash_transactions: cash,
+        }
+    }
+
+    fn position(conid: &str, quantity: f64) -> crate::types::FlexPosition {
+        crate::types::FlexPosition {
+            conid: Some(conid.to_owned()),
+            symbol: Some("NEM".to_owned()),
+            description: Some("NEWMONT CORP".to_owned()),
+            asset_category: Some("STK".to_owned()),
+            currency: Some("USD".to_owned()),
+            quantity: Some(quantity),
+            position_value: Some(quantity * 100.0),
+            mark_price: Some(100.0),
+            cost_basis_price: Some(90.0),
+            fifo_pnl_unrealized: Some(quantity * 10.0),
+            multiplier: Some(1.0),
+            strike: None,
+            expiry: None,
+            put_call: None,
+            underlying_conid: None,
+            underlying_symbol: None,
+            open_date_time: Some("20260807;120536".to_owned()),
+            originating_transaction_id: Some("open-1".to_owned()),
+            side: Some("Long".to_owned()),
+            level_of_detail: Some("EXECUTION".to_owned()),
+            report_date: Some("20260831".to_owned()),
+        }
+    }
+
+    fn cash_balance(
+        currency: &str,
+        starting: f64,
+        ending: f64,
+    ) -> crate::types::CashReportCurrency {
+        crate::types::CashReportCurrency {
+            currency: Some(currency.to_owned()),
+            from_date: Some("2026-03-01".to_owned()),
+            to_date: Some("2026-03-31".to_owned()),
+            starting_cash: Some(starting),
+            ending_cash: Some(ending),
+            ending_settled_cash: Some(ending),
+            commissions: None,
+            deposits: None,
+            withdrawals: None,
+            deposit_withdrawals: None,
+            dividends: None,
+            broker_interest: None,
+            bond_interest: None,
+            withholding_tax: None,
+            other_fees: None,
+            client_fees: None,
+            broker_fees: None,
+            net_trades_sales: None,
+            net_trades_purchases: None,
+            account_transfers: None,
+            internal_transfers: None,
+            external_transfers: None,
+            fx_translation_pnl: None,
+            realized_forex_pnl: None,
+            cash_settling_mtm: None,
+            linking_adjustments: None,
+            transaction_tax: None,
+            payment_in_lieu: None,
+            billable_sales_tax: None,
+            other_income: None,
+            level_of_detail: None,
         }
     }
 
@@ -780,6 +898,8 @@ mod tests {
             cash_transactions: 0,
             skipped: 4,
             cash_dated: 0,
+            positions: 0,
+            cash_report: 0,
             etag: None,
         };
         let (capabilities, hint) = SyncCapabilities::of(&stats);
@@ -791,13 +911,17 @@ mod tests {
         stats.lots = 3;
         stats.cash_transactions = 2;
         stats.cash_dated = 2;
+        stats.positions = 4;
+        stats.cash_report = 2;
         let (capabilities, hint) = SyncCapabilities::of(&stats);
         assert_eq!(
             capabilities,
             SyncCapabilities {
                 round_trips: true,
                 cash_movements: true,
-                cash_dates: true
+                cash_dates: true,
+                positions: true,
+                cash_report: true,
             }
         );
         assert!(hint.is_none(), "{hint:?}");
@@ -874,6 +998,104 @@ mod tests {
         assert!(message.contains("flex report -o json"), "{message}");
         drop(store);
         cleanup(&path);
+    }
+
+    #[test]
+    fn positions_and_balances_are_stored_and_answer_their_questions() {
+        let path = temp_store("positions");
+        let mut store = Store::open(&path).unwrap();
+        let stats = store
+            .upsert_report(
+                "window",
+                None,
+                &payload_with_sections(
+                    Vec::new(),
+                    Vec::new(),
+                    vec![cash("c1", -20.0)],
+                    vec![position("265598", 10.0), position("814595107", -5.0)],
+                    vec![
+                        cash_balance("USD", 1000.0, 980.0),
+                        cash_balance("BASE_SUMMARY", 1000.0, 980.0),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(stats.positions, 2);
+        assert_eq!(stats.cash_report, 2);
+
+        // The snapshot keeps the open date and the execution that opened it.
+        let rows = store
+            .query("SELECT conid, quantity, open_date, originating_transaction_id FROM positions ORDER BY conid")
+            .unwrap();
+        assert_eq!(rows.rows[0][0], Value::Text("265598".to_owned()));
+        assert_eq!(rows.rows[0][1], Value::Real(10.0));
+        assert_eq!(rows.rows[0][2], Value::Text("2026-08-07".to_owned()));
+        assert_eq!(rows.rows[0][3], Value::Text("open-1".to_owned()));
+
+        // Unrealized P/L comes from the statement, per report and asset class.
+        let unrealized = store
+            .query("SELECT positions, ROUND(unrealized, 2) FROM unrealized_pnl")
+            .unwrap();
+        assert_eq!(unrealized.rows[0][0], Value::Integer(2));
+        assert_eq!(unrealized.rows[0][1], Value::Real(50.0));
+
+        // Cash: a currency row reconciles against its own movements exactly.
+        // The base row converts each movement with its own `fx_rate_to_base`
+        // (the fixture carries 1.25), so its `unexplained` is the conversion,
+        // not a bug — which is why the view calls it unexplained rather than
+        // claiming the books balance.
+        let reconciliation = store
+            .query("SELECT currency, ROUND(balance_change, 2), ROUND(movements, 2), ROUND(unexplained, 2) FROM cash_reconciliation ORDER BY currency")
+            .unwrap();
+        assert_eq!(
+            reconciliation.rows[0][0],
+            Value::Text("BASE_SUMMARY".to_owned())
+        );
+        assert_eq!(reconciliation.rows[0][1], Value::Real(-20.0));
+        assert_eq!(reconciliation.rows[0][2], Value::Real(-25.0));
+        assert_eq!(reconciliation.rows[0][3], Value::Real(5.0));
+        assert_eq!(reconciliation.rows[1][0], Value::Text("USD".to_owned()));
+        assert_eq!(reconciliation.rows[1][2], Value::Real(-20.0));
+        assert_eq!(reconciliation.rows[1][3], Value::Real(0.0));
+
+        // Status reports both as capabilities.
+        let overview = store.status().unwrap();
+        assert_eq!(overview.positions, 2);
+        assert_eq!(overview.cash_report, 2);
+        assert!(overview.capabilities.positions);
+        assert!(overview.capabilities.cash_report);
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_report_without_positions_says_so() {
+        let mut stats = SyncStats {
+            report: "r".to_owned(),
+            from_date: None,
+            to_date: None,
+            executions: 5,
+            lots: 1,
+            cash_transactions: 1,
+            skipped: 0,
+            cash_dated: 1,
+            positions: 0,
+            cash_report: 0,
+            etag: None,
+        };
+        let (capabilities, hint) = SyncCapabilities::of(&stats);
+        assert!(!capabilities.positions);
+        assert!(!capabilities.cash_report);
+        let hint = hint.expect("missing sections are worth naming");
+        assert!(hint.contains("Open Positions"), "{hint}");
+        assert!(hint.contains("Cash Report"), "{hint}");
+
+        stats.positions = 3;
+        stats.cash_report = 2;
+        let (capabilities, hint) = SyncCapabilities::of(&stats);
+        assert!(capabilities.positions);
+        assert!(capabilities.cash_report);
+        assert!(hint.is_none(), "{hint:?}");
     }
 
     #[test]

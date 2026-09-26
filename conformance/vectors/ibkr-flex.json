@@ -100,24 +100,44 @@
           "cashDated": 0
         },
         "payload": [
-          { "path": "trades.0.putCall", "equals": null },
-          { "path": "trades.0.tradeTime", "equals": "20260302;100000" },
-          { "path": "trades.1.openClose", "equals": "C;O" },
-          { "path": "trades.1.tradeDate", "equals": "20260828" }
+          {
+            "path": "trades.0.putCall",
+            "equals": null
+          },
+          {
+            "path": "trades.0.tradeTime",
+            "equals": "20260302;100000"
+          },
+          {
+            "path": "trades.1.openClose",
+            "equals": "C;O"
+          },
+          {
+            "path": "trades.1.tradeDate",
+            "equals": "20260828"
+          }
         ],
         "queries": [
           {
             "sql": "SELECT trade_date, trade_time FROM executions WHERE transaction_id = 'e2'",
-            "rows": [["2026-08-28", "20260828;123310"]]
+            "rows": [
+              [
+                "2026-08-28",
+                "20260828;123310"
+              ]
+            ]
           },
           {
             "sql": "SELECT trade_date FROM executions WHERE transaction_id = 'e1'",
-            "rows": [["2026-03-02"]]
+            "rows": [
+              [
+                "2026-03-02"
+              ]
+            ]
           }
         ]
       }
     },
-
     {
       "name": "levels-are-partitioned-and-lots-arrive-separately",
       "why": "Flex mixes levels of detail in one array, and lots and their executions both carry realized P/L, so summing across levels double counts (ljuti/ibkr-gateway#6). The gateway puts CLOSED_LOT rows in their own `lots` array; a consumer must keep them apart from `trades` and from the summary levels, whichever array they arrive in.",
@@ -204,20 +224,42 @@
           "cashDated": 0
         },
         "queries": [
-          { "sql": "SELECT COUNT(*) FROM executions", "rows": [[1]] },
-          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[2]] },
+          {
+            "sql": "SELECT COUNT(*) FROM executions",
+            "rows": [
+              [
+                1
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM round_trips",
+            "rows": [
+              [
+                2
+              ]
+            ]
+          },
           {
             "sql": "SELECT ROUND(SUM(realized_pnl), 3) FROM round_trips",
-            "rows": [[125.325]]
+            "rows": [
+              [
+                125.325
+              ]
+            ]
           },
           {
             "sql": "SELECT open_date, close_date FROM round_trips WHERE open_transaction_id = 'open-exec-2'",
-            "rows": [["2026-08-07", "2026-08-28"]]
+            "rows": [
+              [
+                "2026-08-07",
+                "2026-08-28"
+              ]
+            ]
           }
         ]
       }
     },
-
     {
       "name": "identical-lots-belong-to-different-closes",
       "why": "One order can fill in several executions, and two of them can close the same quantity of the same opened lot — the lot rows are then byte-identical. They are distinct records: collapsing them by content loses real money (measured: a 365-day statement's realized total went from 321,073.25 to 313,022.24 when keyed by content alone). Consumers key a lot by its content plus how many identical rows preceded it.",
@@ -272,20 +314,49 @@
           "cashDated": 0
         },
         "queries": [
-          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[2]] },
-          { "sql": "SELECT ROUND(SUM(realized_pnl), 3) FROM round_trips", "rows": [[44.75]] },
+          {
+            "sql": "SELECT COUNT(*) FROM round_trips",
+            "rows": [
+              [
+                2
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT ROUND(SUM(realized_pnl), 3) FROM round_trips",
+            "rows": [
+              [
+                44.75
+              ]
+            ]
+          },
           {
             "sql": "SELECT quantity, cost, ROUND(realized_pnl, 3) FROM round_trips WHERE quantity = 500",
-            "rows": [[500.0, 238.7625, 22.375], [500.0, 238.7625, 22.375]]
+            "rows": [
+              [
+                500.0,
+                238.7625,
+                22.375
+              ],
+              [
+                500.0,
+                238.7625,
+                22.375
+              ]
+            ]
           },
           {
             "sql": "SELECT COUNT(*), COUNT(DISTINCT open_transaction_id) FROM round_trips",
-            "rows": [[2, 1]]
+            "rows": [
+              [
+                2,
+                1
+              ]
+            ]
           }
         ]
       }
     },
-
     {
       "name": "cash-detail-not-summary",
       "why": "Cash transactions are multi-level too: DETAIL rows are the movements, SUMMARY rows restate the same money per report date, and their totals are identical (measured: -39,217.59 each, -78,435.18 together). The gateway returns both and labels them (ljuti/ibkr-gateway#8); a consumer that sums the array as delivered doubles every cash flow. Movements without a transaction id have nothing to dedupe on and are counted, not guessed at.",
@@ -348,20 +419,42 @@
           "cashDated": 1
         },
         "queries": [
-          { "sql": "SELECT COUNT(*) FROM cash_transactions", "rows": [[2]] },
-          { "sql": "SELECT ROUND(SUM(amount), 2) FROM cash_transactions", "rows": [[23.92]] },
+          {
+            "sql": "SELECT COUNT(*) FROM cash_transactions",
+            "rows": [
+              [
+                2
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT ROUND(SUM(amount), 2) FROM cash_transactions",
+            "rows": [
+              [
+                23.92
+              ]
+            ]
+          },
           {
             "sql": "SELECT COUNT(*) FROM cash_transactions WHERE date IS NULL",
-            "rows": [[1]]
+            "rows": [
+              [
+                1
+              ]
+            ]
           },
           {
             "sql": "SELECT currency, ROUND(amount, 2) FROM cash_by_type WHERE type = 'Broker Interest Received'",
-            "rows": [["USD", 42.5]]
+            "rows": [
+              [
+                "USD",
+                42.5
+              ]
+            ]
           }
         ]
       }
     },
-
     {
       "name": "a-zero-price-close-is-not-dropped",
       "why": "Assignments and expirations arrive as closing executions with a zero price and the realized P/L in fifoPnlRealized. Normalizing trades to {side, quantity, price} and discarding non-positive prices (a shape other Flex consumers use) silently loses them; the close is also what makes a position's round trip complete.",
@@ -422,19 +515,35 @@
           "cashDated": 0
         },
         "queries": [
-          { "sql": "SELECT COUNT(*) FROM executions WHERE price = 0", "rows": [[1]] },
+          {
+            "sql": "SELECT COUNT(*) FROM executions WHERE price = 0",
+            "rows": [
+              [
+                1
+              ]
+            ]
+          },
           {
             "sql": "SELECT ROUND(SUM(realized_pnl), 2) FROM executions WHERE open_close = 'C'",
-            "rows": [[-2050.0]]
+            "rows": [
+              [
+                -2050.0
+              ]
+            ]
           },
           {
             "sql": "SELECT strike, put_call, expiry FROM executions WHERE transaction_id = 'c1'",
-            "rows": [[205.0, "C", "2026-09-18"]]
+            "rows": [
+              [
+                205.0,
+                "C",
+                "2026-09-18"
+              ]
+            ]
           }
         ]
       }
     },
-
     {
       "name": "overlapping-reports-converge",
       "why": "Report windows overlap (a 30-day window sits inside a yearly one), so the same execution and the same lot arrive twice. Rows are keyed by IB transaction id (executions) and by lot content plus ordinal (lots), so the second report adds only what the first did not have.",
@@ -545,9 +654,159 @@
           }
         ],
         "queries": [
-          { "sql": "SELECT COUNT(*) FROM executions", "rows": [[2]] },
-          { "sql": "SELECT COUNT(*) FROM round_trips", "rows": [[1]] },
-          { "sql": "SELECT COUNT(*) FROM sync_state", "rows": [[2]] }
+          {
+            "sql": "SELECT COUNT(*) FROM executions",
+            "rows": [
+              [
+                2
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM round_trips",
+            "rows": [
+              [
+                1
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM sync_state",
+            "rows": [
+              [
+                2
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "positions-and-balances-are-a-snapshot",
+      "why": "Open Positions is a snapshot at the report date, not a windowed history, and it is the only place a consumer learns when an *open* position was opened: each row carries openDateTime and originatingTransactionId, the open half of a round trip that closed-lots rows can only give for trades that already closed. Cash Report is what makes cash movements reconcilable — a balance change to check them against (ljuti/ibkr-gateway#10). Both sections are empty when the query does not request them, which is not the same as 'no positions'.",
+      "report": "vector",
+      "raw": {
+        "accountId": "U1234567",
+        "trades": [],
+        "lots": [],
+        "positions": [
+          {
+            "conid": "265598",
+            "symbol": "NEM",
+            "description": "NEWMONT CORP",
+            "assetCategory": "STK",
+            "currency": "USD",
+            "quantity": 10.0,
+            "positionValue": 1000.0,
+            "markPrice": 100.0,
+            "costBasisPrice": 90.0,
+            "fifoPnlUnrealized": 100.0,
+            "multiplier": 1.0,
+            "strike": null,
+            "expiry": null,
+            "putCall": null,
+            "underlyingConid": null,
+            "underlyingSymbol": null,
+            "openDateTime": "20260807;120536",
+            "originatingTransactionId": "open-1",
+            "side": "Long",
+            "levelOfDetail": "EXECUTION",
+            "reportDate": "20260831"
+          }
+        ],
+        "cashReport": [
+          {
+            "currency": "USD",
+            "fromDate": "2026-03-01",
+            "toDate": "2026-03-31",
+            "startingCash": 1000.0,
+            "endingCash": 980.0,
+            "endingSettledCash": 980.0
+          },
+          {
+            "currency": "BASE_SUMMARY",
+            "fromDate": "2026-03-01",
+            "toDate": "2026-03-31",
+            "startingCash": 1000.0,
+            "endingCash": 980.0,
+            "endingSettledCash": 980.0
+          }
+        ],
+        "cashTransactions": [
+          {
+            "transactionId": "c1",
+            "accountId": "U1234567",
+            "transactionType": "Other Fees",
+            "description": "OPRA PRO",
+            "amount": -20.0,
+            "currency": "USD",
+            "fxRateToBase": 1.0,
+            "date": "2026-03-15",
+            "levelOfDetail": "DETAIL"
+          }
+        ]
+      },
+      "expect": {
+        "ingest": {
+          "executions": 0,
+          "lots": 0,
+          "cashTransactions": 1,
+          "skipped": 0,
+          "cashDated": 1,
+          "positions": 1,
+          "cashReport": 2
+        },
+        "payload": [
+          {
+            "path": "positions.0.putCall",
+            "equals": null
+          },
+          {
+            "path": "positions.0.openDateTime",
+            "equals": "20260807;120536"
+          },
+          {
+            "path": "cashReport.1.currency",
+            "equals": "BASE_SUMMARY"
+          }
+        ],
+        "queries": [
+          {
+            "sql": "SELECT conid, quantity, open_date, originating_transaction_id FROM positions",
+            "rows": [
+              [
+                "265598",
+                10.0,
+                "2026-08-07",
+                "open-1"
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT positions, ROUND(position_value, 2), ROUND(unrealized, 2) FROM unrealized_pnl",
+            "rows": [
+              [
+                1,
+                1000.0,
+                100.0
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT currency, ROUND(balance_change, 2), ROUND(unexplained, 2) FROM cash_reconciliation ORDER BY currency",
+            "rows": [
+              [
+                "BASE_SUMMARY",
+                -20.0,
+                0.0
+              ],
+              [
+                "USD",
+                -20.0,
+                0.0
+              ]
+            ]
+          }
         ]
       }
     }

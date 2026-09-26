@@ -331,8 +331,19 @@ Views answer the usual questions with the broker's own numbers:
 | `pnl_by_symbol`, `pnl_by_month`, `pnl_by_asset_class` | realized P/L per close, grouped |
 | `trade_stats` | closes, wins, losses, flat, realized P/L, average win/loss |
 | `cash_by_type` | dividends, withholding, fees, interest, transfers |
-| `open_positions` | net position per contract, derived from executions |
+| `positions` | the statement's own open-position snapshot, with `open_date` and the execution that opened each one |
+| `unrealized_pnl` | mark-to-market per report, currency and asset class |
+| `cash_reconciliation` | each report's balance change against the movements stored beside it, with the difference as `unexplained` |
+| `open_positions` | net position per contract, derived from executions — a fallback for reports that carry no snapshot |
 | `round_trips` | opening execution ↔ close, quantity, cost basis, realized P/L (from the statement's closed lots) |
+
+What the store can answer depends on which Flex sections the query asks for, and
+`store status` says which are missing: **Trades** (executions), **Closed Lots**
+(exact round trips), **Cash Transactions** (movements), **Open Positions** (the
+statement's own positions, including when each one was opened) and **Cash
+Report** (balances, so movements can be reconciled). Positions are a snapshot at
+the report date rather than a history, so a position history comes from syncing
+several windows.
 
 `realized_pnl` is the broker's figure for a closing execution, not something
 recomputed here: pairing executions ourselves reproduces the broker's open

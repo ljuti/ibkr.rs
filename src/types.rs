@@ -800,6 +800,135 @@ pub(crate) fn flex_date(value: &str) -> Option<String> {
     }
 }
 
+/// One open position from a Flex statement's `OpenPositions` section.
+///
+/// A snapshot at the report date, not a windowed history: a position history
+/// comes from syncing several report windows.
+///
+/// Every attribute is optional on the wire and maps to an `Option`, so an
+/// absent attribute is absent here rather than a guessed default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlexPosition {
+    /// IB contract id.
+    pub conid: Option<String>,
+    /// Symbol.
+    pub symbol: Option<String>,
+    /// Instrument description.
+    pub description: Option<String>,
+    /// Wire spelling (`STK`, `OPT`, `FUT`, ...).
+    pub asset_category: Option<String>,
+    /// Currency the values are stated in.
+    pub currency: Option<String>,
+    /// Signed quantity: negative is short.
+    pub quantity: Option<f64>,
+    /// Position value in `currency`.
+    pub position_value: Option<f64>,
+    /// Mark price per unit.
+    pub mark_price: Option<f64>,
+    /// Cost basis per unit.
+    pub cost_basis_price: Option<f64>,
+    /// Unrealized P/L, FIFO.
+    pub fifo_pnl_unrealized: Option<f64>,
+    /// Contract multiplier.
+    pub multiplier: Option<f64>,
+    /// Option strike.
+    pub strike: Option<f64>,
+    /// Option expiry (`YYYY-MM-DD`).
+    pub expiry: Option<String>,
+    /// Option right, `C` or `P`.
+    pub put_call: Option<String>,
+    /// Underlying contract id.
+    pub underlying_conid: Option<String>,
+    /// Underlying symbol.
+    pub underlying_symbol: Option<String>,
+    /// When the position was opened, verbatim (`20260807;120536`).
+    pub open_date_time: Option<String>,
+    /// The opening execution's transaction id — joins the position to the trade that opened it.
+    pub originating_transaction_id: Option<String>,
+    /// `Long`/`Short`, as the statement reports it.
+    pub side: Option<String>,
+    /// Row label when the section is multi-level.
+    pub level_of_detail: Option<String>,
+    /// Snapshot date (`YYYY-MM-DD`).
+    pub report_date: Option<String>,
+}
+
+/// One currency's balances and movements from a Flex statement's `CashReport`
+/// section.
+///
+/// The `BASE_SUMMARY` row is the account's base currency and arrives as its own
+/// entry, never folded into the currencies.
+///
+/// Every attribute is optional on the wire and maps to an `Option`, so an
+/// absent attribute is absent here rather than a guessed default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashReportCurrency {
+    /// Currency code, or `BASE_SUMMARY` for the base-currency row.
+    pub currency: Option<String>,
+    /// Window start this report covers.
+    pub from_date: Option<String>,
+    /// Window end.
+    pub to_date: Option<String>,
+    /// Level of detail.
+    pub level_of_detail: Option<String>,
+    /// Cash at the window start.
+    pub starting_cash: Option<f64>,
+    /// Cash at the window end.
+    pub ending_cash: Option<f64>,
+    /// Settled cash at the window end.
+    pub ending_settled_cash: Option<f64>,
+    /// Commissions paid.
+    pub commissions: Option<f64>,
+    /// Deposits.
+    pub deposits: Option<f64>,
+    /// Withdrawals.
+    pub withdrawals: Option<f64>,
+    /// Net deposits and withdrawals.
+    pub deposit_withdrawals: Option<f64>,
+    /// Dividends received.
+    pub dividends: Option<f64>,
+    /// Broker interest.
+    pub broker_interest: Option<f64>,
+    /// Bond interest.
+    pub bond_interest: Option<f64>,
+    /// Withholding tax.
+    pub withholding_tax: Option<f64>,
+    /// Other fees.
+    pub other_fees: Option<f64>,
+    /// Client fees.
+    pub client_fees: Option<f64>,
+    /// Broker fees.
+    pub broker_fees: Option<f64>,
+    /// Net trade sales.
+    pub net_trades_sales: Option<f64>,
+    /// Net trade purchases.
+    pub net_trades_purchases: Option<f64>,
+    /// Account transfers.
+    pub account_transfers: Option<f64>,
+    /// Internal transfers.
+    pub internal_transfers: Option<f64>,
+    /// External transfers.
+    pub external_transfers: Option<f64>,
+    /// FX translation P/L.
+    pub fx_translation_pnl: Option<f64>,
+    /// Realized forex P/L.
+    pub realized_forex_pnl: Option<f64>,
+    /// Cash settling mark-to-market.
+    pub cash_settling_mtm: Option<f64>,
+    /// Linking adjustments.
+    pub linking_adjustments: Option<f64>,
+    /// Transaction tax.
+    pub transaction_tax: Option<f64>,
+    /// Payments in lieu.
+    pub payment_in_lieu: Option<f64>,
+    /// Billable sales tax.
+    pub billable_sales_tax: Option<f64>,
+    /// Other income.
+    pub other_income: Option<f64>,
+}
+
 /// Flex report envelope: trades and cash transactions in one response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -818,6 +947,14 @@ pub struct FlexReportResponse {
     /// double counts. Absent on gateways that do not map them yet.
     #[serde(default)]
     pub lots: Vec<Trade>,
+    /// Open positions, from the statement's `OpenPositions` section (empty when
+    /// the query does not request it).
+    #[serde(default)]
+    pub positions: Vec<FlexPosition>,
+    /// Per-currency balances and movements, from the statement's `CashReport`
+    /// section (empty when the query does not request it).
+    #[serde(default)]
+    pub cash_report: Vec<CashReportCurrency>,
     /// Cash transactions.
     pub cash_transactions: Vec<CashTransaction>,
 }

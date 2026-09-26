@@ -31,8 +31,13 @@ First public release (crate version `0.1.0`).
 - **`store import`**: store a payload written by `flex report -o json` (from a
   file or stdin) without a gateway — archived windows, payloads from another
   machine, or one kept from a bug report.
+- **Positions and balances**: Flex statements now carry their `OpenPositions`
+  and `CashReport` sections, so the store keeps the statement's own positions
+  (with the open date and the execution that opened each one) instead of
+  deriving them, and reconciles cash movements against the report's balances.
 - **Analysis views**: `pnl_by_symbol`, `pnl_by_month`, `pnl_by_asset_class`,
-  `trade_stats`, `cash_by_type`, `open_positions`, `round_trips` — with the
+  `trade_stats`, `cash_by_type`, `positions`, `unrealized_pnl`,
+  `cash_reconciliation`, `open_positions`, `round_trips` — with the
   broker's own realized P/L, and closed-lot rows for exact round trips.
 - **Conformance vectors** (`conformance/vectors/`): the gateway's Flex payload
   contract as data, run by `cargo test --test conformance`. Cross-language by

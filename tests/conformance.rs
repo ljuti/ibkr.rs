@@ -155,6 +155,8 @@ fn check_counts(
         "cashTransactions": stats.cash_transactions,
         "skipped": stats.skipped,
         "cashDated": stats.cash_dated,
+        "positions": stats.positions,
+        "cashReport": stats.cash_report,
     });
     for (field, want) in expected {
         let got = &actual[field];

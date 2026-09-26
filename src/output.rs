@@ -901,6 +901,8 @@ pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Res
         "executions",
         "lots",
         "cash",
+        "positions",
+        "balances",
         "skipped",
         "synced at",
     ]);
@@ -912,14 +914,22 @@ pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Res
             report.executions.to_string(),
             report.lots.to_string(),
             report.cash_transactions.to_string(),
+            report.positions.to_string(),
+            report.cash_report.to_string(),
             report.skipped.to_string(),
             report.synced_at.clone(),
         ]);
     }
     print_table(&table, mode)?;
     note(&format!(
-        "store holds {} executions, {} closed lots, {} cash movements ({} dated)",
-        status.executions, status.lots, status.cash_transactions, status.cash_dated
+        "store holds {} executions, {} closed lots, {} cash movements ({} dated), \
+         {} positions, {} cash balances",
+        status.executions,
+        status.lots,
+        status.cash_transactions,
+        status.cash_dated,
+        status.positions,
+        status.cash_report
     ));
     for line in capability_notes(&status.capabilities) {
         note(&line);
@@ -948,6 +958,24 @@ pub fn capability_notes(capabilities: &crate::store::SyncCapabilities) -> Vec<St
     } else {
         lines.push(
             "cash movements: none stored — add the Cash Transactions section to the Flex query"
+                .to_owned(),
+        );
+    }
+    if capabilities.positions {
+        lines.push("positions: from the statement's own snapshot".to_owned());
+    } else {
+        lines.push(
+            "positions: derived from executions only — add the Open Positions section to the Flex \
+             query for the statement's own snapshot"
+                .to_owned(),
+        );
+    }
+    if capabilities.cash_report {
+        lines.push("cash balances: stored, so movements can be reconciled".to_owned());
+    } else {
+        lines.push(
+            "cash balances: none stored — add the Cash Report section to the Flex query to \
+             reconcile movements"
                 .to_owned(),
         );
     }
@@ -1247,6 +1275,8 @@ mod tests {
             round_trips: false,
             cash_movements: false,
             cash_dates: false,
+            positions: false,
+            cash_report: false,
         };
         let lines = capability_notes(&none);
         assert!(
@@ -1262,6 +1292,8 @@ mod tests {
             round_trips: true,
             cash_movements: true,
             cash_dates: true,
+            positions: true,
+            cash_report: true,
         };
         let lines = capability_notes(&all);
         assert!(lines.iter().any(|line| line.contains("exact")), "{lines:?}");
@@ -1274,6 +1306,8 @@ mod tests {
             round_trips: true,
             cash_movements: true,
             cash_dates: false,
+            positions: true,
+            cash_report: true,
         };
         assert!(
             capability_notes(&undated)

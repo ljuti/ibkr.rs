@@ -28,6 +28,10 @@ pub struct SyncStats {
     pub skipped: usize,
     /// Cash movements that arrived with an event date.
     pub cash_dated: usize,
+    /// Open positions stored.
+    pub positions: usize,
+    /// Currency rows stored from the cash report.
+    pub cash_report: usize,
     /// `ETag` the payload arrived with.
     pub etag: Option<String>,
 }
@@ -94,10 +98,11 @@ const CASH_INSERT: &str = "
 
 const SYNC_STATE_UPSERT: &str = "
     INSERT INTO sync_state (
-        report, from_date, to_date, etag, executions, lots, cash_transactions, skipped, synced_at
+        report, from_date, to_date, etag, executions, lots, cash_transactions, skipped,
+        positions, cash_report, synced_at
     ) VALUES (
         :report, :from_date, :to_date, :etag, :executions, :lots, :cash_transactions, :skipped,
-        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        :positions, :cash_report, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
     )
     ON CONFLICT (report) DO UPDATE SET
         from_date = excluded.from_date,
@@ -107,6 +112,8 @@ const SYNC_STATE_UPSERT: &str = "
         lots = excluded.lots,
         cash_transactions = excluded.cash_transactions,
         skipped = excluded.skipped,
+        positions = excluded.positions,
+        cash_report = excluded.cash_report,
         synced_at = excluded.synced_at";
 
 /// `SQLite` stores integers as `i64`; row counts never approach the limit.
@@ -135,6 +142,8 @@ pub(super) fn upsert(
         cash_transactions: 0,
         skipped: 0,
         cash_dated: 0,
+        positions: 0,
+        cash_report: 0,
         etag: etag.map(str::to_owned),
     };
 
@@ -149,6 +158,8 @@ pub(super) fn upsert(
     insert_trades(&transaction, report, payload, &mut stats)?;
     insert_lots(&transaction, report, &payload.lots, &mut stats)?;
     insert_cash(&transaction, report, payload, &mut stats)?;
+    insert_positions(&transaction, report, payload, &mut stats)?;
+    insert_cash_report(&transaction, report, payload, &mut stats)?;
     record_sync_state(&transaction, &stats)?;
     transaction.commit()?;
     Ok(stats)
@@ -356,6 +367,147 @@ fn insert_cash(
     Ok(())
 }
 
+const POSITION_INSERT: &str = "
+    INSERT OR REPLACE INTO positions (
+        position_key, report, conid, symbol, description, asset_category, currency, quantity,
+        position_value, mark_price, cost_basis_price, fifo_pnl_unrealized, multiplier, strike,
+        expiry, put_call, underlying_conid, underlying_symbol, open_date_time, open_date,
+        originating_transaction_id, side, level_of_detail, report_date, synced_at
+    ) VALUES (
+        :position_key, :report, :conid, :symbol, :description, :asset_category, :currency,
+        :quantity, :position_value, :mark_price, :cost_basis_price, :fifo_pnl_unrealized,
+        :multiplier, :strike, :expiry, :put_call, :underlying_conid, :underlying_symbol,
+        :open_date_time, :open_date, :originating_transaction_id, :side, :level_of_detail,
+        :report_date, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    )";
+
+const CASH_REPORT_INSERT: &str = "
+    INSERT OR REPLACE INTO cash_report (
+        report, currency, from_date, to_date, starting_cash, ending_cash, ending_settled_cash,
+        commissions, deposits, withdrawals, deposit_withdrawals, dividends, broker_interest,
+        bond_interest, withholding_tax, other_fees, client_fees, broker_fees, net_trades_sales,
+        net_trades_purchases, account_transfers, internal_transfers, external_transfers,
+        fx_translation_pnl, realized_forex_pnl, cash_settling_mtm, linking_adjustments,
+        transaction_tax, payment_in_lieu, billable_sales_tax, other_income, level_of_detail,
+        synced_at
+    ) VALUES (
+        :report, :currency, :from_date, :to_date, :starting_cash, :ending_cash,
+        :ending_settled_cash, :commissions, :deposits, :withdrawals, :deposit_withdrawals,
+        :dividends, :broker_interest, :bond_interest, :withholding_tax, :other_fees,
+        :client_fees, :broker_fees, :net_trades_sales, :net_trades_purchases,
+        :account_transfers, :internal_transfers, :external_transfers, :fx_translation_pnl,
+        :realized_forex_pnl, :cash_settling_mtm, :linking_adjustments, :transaction_tax,
+        :payment_in_lieu, :billable_sales_tax, :other_income, :level_of_detail,
+        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    )";
+
+/// Open positions: a snapshot at the report date, keyed so that a re-sync
+/// replaces a row rather than appending a second copy of it.
+fn insert_positions(
+    transaction: &rusqlite::Transaction<'_>,
+    report: &str,
+    payload: &FlexReportResponse,
+    stats: &mut SyncStats,
+) -> Result<()> {
+    let mut insert = transaction.prepare(POSITION_INSERT)?;
+    for position in &payload.positions {
+        // One contract can appear once per snapshot; the key keeps a re-sync
+        // idempotent even when the report is not the only contributor.
+        let position_key = format!(
+            "{report}|{}|{}|{}|{}",
+            position.conid.as_deref().unwrap_or(""),
+            position.open_date_time.as_deref().unwrap_or(""),
+            position.originating_transaction_id.as_deref().unwrap_or(""),
+            position.side.as_deref().unwrap_or(""),
+        );
+        insert.execute(named_params! {
+            ":position_key": position_key,
+            ":report": report,
+            ":conid": position.conid,
+            ":symbol": position.symbol,
+            ":description": position.description,
+            ":asset_category": position.asset_category,
+            ":currency": position.currency,
+            ":quantity": position.quantity,
+            ":position_value": position.position_value,
+            ":mark_price": position.mark_price,
+            ":cost_basis_price": position.cost_basis_price,
+            ":fifo_pnl_unrealized": position.fifo_pnl_unrealized,
+            ":multiplier": position.multiplier,
+            ":strike": position.strike,
+            ":expiry": as_date(position.expiry.as_deref()),
+            ":put_call": position.put_call,
+            ":underlying_conid": position.underlying_conid,
+            ":underlying_symbol": position.underlying_symbol,
+            ":open_date_time": position.open_date_time,
+            ":open_date": as_date(position.open_date_time.as_deref()),
+            ":originating_transaction_id": position.originating_transaction_id,
+            ":side": position.side,
+            ":level_of_detail": position.level_of_detail,
+            ":report_date": as_date(position.report_date.as_deref()),
+        })?;
+        stats.positions += 1;
+    }
+    Ok(())
+}
+
+/// Cash report rows: balances per currency, `BASE_SUMMARY` included.
+fn insert_cash_report(
+    transaction: &rusqlite::Transaction<'_>,
+    report: &str,
+    payload: &FlexReportResponse,
+    stats: &mut SyncStats,
+) -> Result<()> {
+    let mut insert = transaction.prepare(CASH_REPORT_INSERT)?;
+    for row in &payload.cash_report {
+        let Some(currency) = row
+            .currency
+            .as_deref()
+            .map(str::trim)
+            .filter(|currency| !currency.is_empty())
+        else {
+            stats.skipped += 1;
+            continue;
+        };
+        insert.execute(named_params! {
+            ":report": report,
+            ":currency": currency,
+            ":from_date": as_date(row.from_date.as_deref()),
+            ":to_date": as_date(row.to_date.as_deref()),
+            ":starting_cash": row.starting_cash,
+            ":ending_cash": row.ending_cash,
+            ":ending_settled_cash": row.ending_settled_cash,
+            ":commissions": row.commissions,
+            ":deposits": row.deposits,
+            ":withdrawals": row.withdrawals,
+            ":deposit_withdrawals": row.deposit_withdrawals,
+            ":dividends": row.dividends,
+            ":broker_interest": row.broker_interest,
+            ":bond_interest": row.bond_interest,
+            ":withholding_tax": row.withholding_tax,
+            ":other_fees": row.other_fees,
+            ":client_fees": row.client_fees,
+            ":broker_fees": row.broker_fees,
+            ":net_trades_sales": row.net_trades_sales,
+            ":net_trades_purchases": row.net_trades_purchases,
+            ":account_transfers": row.account_transfers,
+            ":internal_transfers": row.internal_transfers,
+            ":external_transfers": row.external_transfers,
+            ":fx_translation_pnl": row.fx_translation_pnl,
+            ":realized_forex_pnl": row.realized_forex_pnl,
+            ":cash_settling_mtm": row.cash_settling_mtm,
+            ":linking_adjustments": row.linking_adjustments,
+            ":transaction_tax": row.transaction_tax,
+            ":payment_in_lieu": row.payment_in_lieu,
+            ":billable_sales_tax": row.billable_sales_tax,
+            ":other_income": row.other_income,
+            ":level_of_detail": row.level_of_detail,
+        })?;
+        stats.cash_report += 1;
+    }
+    Ok(())
+}
+
 /// Remember what the report contributed, and its `ETag`.
 fn record_sync_state(transaction: &rusqlite::Transaction<'_>, stats: &SyncStats) -> Result<()> {
     transaction.execute(
@@ -369,6 +521,8 @@ fn record_sync_state(transaction: &rusqlite::Transaction<'_>, stats: &SyncStats)
             ":lots": count(stats.lots),
             ":cash_transactions": count(stats.cash_transactions),
             ":skipped": count(stats.skipped),
+            ":positions": count(stats.positions),
+            ":cash_report": count(stats.cash_report),
         },
     )?;
     Ok(())
@@ -440,6 +594,8 @@ mod tests {
             to_date: Some("2026-03-31".to_owned()),
             trades,
             lots,
+            positions: Vec::new(),
+            cash_report: Vec::new(),
             cash_transactions: cash,
         }
     }
