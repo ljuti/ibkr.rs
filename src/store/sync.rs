@@ -26,6 +26,8 @@ pub struct SyncStats {
     pub cash_transactions: usize,
     /// Rows deliberately left out: aggregates, or rows with no transaction id.
     pub skipped: usize,
+    /// Cash movements that arrived with an event date.
+    pub cash_dated: usize,
     /// `ETag` the payload arrived with.
     pub etag: Option<String>,
 }
@@ -132,6 +134,7 @@ pub(super) fn upsert(
         lots: 0,
         cash_transactions: 0,
         skipped: 0,
+        cash_dated: 0,
         etag: etag.map(str::to_owned),
     };
 
@@ -327,6 +330,13 @@ fn insert_cash(
             stats.skipped += 1;
             continue;
         };
+        if cash
+            .date
+            .as_deref()
+            .is_some_and(|date| !date.trim().is_empty())
+        {
+            stats.cash_dated += 1;
+        }
         cash_insert.execute(named_params! {
             ":transaction_id": transaction_id,
             ":type": cash.transaction_type,

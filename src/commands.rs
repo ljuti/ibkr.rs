@@ -252,32 +252,45 @@ async fn store(
         StoreCommand::Sync { reports, refresh } => {
             let mut store = Store::open(&config.db)?;
             let mut outcomes = Vec::with_capacity(reports.len());
+            let mut failures: Vec<Error> = Vec::new();
             for report in &reports {
-                // Statements are immutable per (query, window), so a stored
-                // ETag turns a re-sync into a 304 and skips the ingest.
-                let etag = if refresh {
-                    None
-                } else {
-                    store.last_etag(report)?
-                };
                 output::note(&format!("syncing {report}"));
-                match client.flex_report(report, refresh, etag.as_deref()).await? {
-                    Conditional::NotModified { etag } => {
-                        outcomes.push(SyncOutcome::NotModified {
-                            report: report.clone(),
-                            etag,
-                        });
+                // One report failing must not cost the others their sync: a
+                // rate-limited 30-day window should not stop the yearly one.
+                match sync_one(&mut store, client, report, refresh).await {
+                    Ok(outcome) => {
+                        if let SyncOutcome::Synced(stats) = &outcome {
+                            let (_, hint) = crate::store::SyncCapabilities::of(stats);
+                            if let Some(hint) = hint {
+                                output::note(&format!("{report}: {hint}"));
+                            }
+                        }
+                        outcomes.push(outcome);
                     }
-                    Conditional::Fresh { value, etag } => {
-                        outcomes.push(SyncOutcome::Synced(store.upsert_report(
-                            report,
-                            etag.as_deref(),
-                            &value,
-                        )?));
+                    Err(error) => {
+                        outcomes.push(SyncOutcome::Failed {
+                            report: report.clone(),
+                            message: error.to_string(),
+                        });
+                        failures.push(error);
                     }
                 }
             }
-            output::store_sync(&outcomes, mode)
+            output::store_sync(&outcomes, mode)?;
+            match failures.len() {
+                0 => Ok(()),
+                // A single report keeps its own error, retry hints and all.
+                1 if reports.len() == 1 => Err(failures.pop().expect("one failure")),
+                failed => Err(Error::Partial {
+                    failed,
+                    total: reports.len(),
+                    detail: failures
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                }),
+            }
         }
 
         StoreCommand::Query { sql } => {
@@ -289,7 +302,39 @@ async fn store(
             let store = Store::open_read_only(&config.db)?;
             output::store_schema(&store.schema()?, mode)
         }
+
+        StoreCommand::Status => {
+            let store = Store::open_read_only(&config.db)?;
+            output::store_status(&store.status()?, mode)
+        }
     }
+}
+
+/// Fetch one report and store it, or report why it was not stored.
+async fn sync_one(
+    store: &mut Store,
+    client: &Client,
+    report: &str,
+    refresh: bool,
+) -> Result<SyncOutcome> {
+    // Statements are immutable per (query, window), so a stored ETag turns a
+    // re-sync into a 304 and skips the ingest.
+    let etag = if refresh {
+        None
+    } else {
+        store.last_etag(report)?
+    };
+    Ok(
+        match client.flex_report(report, refresh, etag.as_deref()).await? {
+            Conditional::NotModified { etag } => SyncOutcome::NotModified {
+                report: report.to_owned(),
+                etag,
+            },
+            Conditional::Fresh { value, etag } => {
+                SyncOutcome::Synced(store.upsert_report(report, etag.as_deref(), &value)?)
+            }
+        },
+    )
 }
 
 /// Ask before changing broker state.

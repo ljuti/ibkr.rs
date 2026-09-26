@@ -64,6 +64,8 @@ src/
   output.rs    # JSON and table rendering, column projections
   store/       # local SQLite store of Flex statements (schema, sync, query)
   types.rs     # wire types (camelCase, timestamps as RFC 3339 strings)
+conformance/
+  vectors/           # the gateway payload contract as data (see conformance/README.md)
 scripts/
   gen-dev-certs.sh   # dev CA + server + client certificates
 .devcontainer/       # Rust dev environment (compose form)
@@ -273,10 +275,24 @@ in a single SQLite file so performance can be asked as SQL:
 
 ```bash
 ibkr store sync --report last_365_days --report transactions_30d   # fetch + upsert
+ibkr store status                                                 # what is synced, what it can answer
 ibkr store schema                                                 # tables, views, columns
 ibkr store query "SELECT * FROM trade_stats" -o table
 ibkr store query "SELECT * FROM pnl_by_month"
 ```
+
+One report failing does not cost the others their sync: a sweep reports each
+report's outcome, keeps the ones that worked, and still exits non-zero. `store
+status` then says what the stored rows are enough to answer — a report without
+the Closed Lots level has no exact round trips, and one without Cash
+Transactions has no cash movements, so the fix (a section to add, and
+`--refresh` to re-fetch) is named where the sync finishes rather than left to be
+discovered as an empty view.
+
+`store sync` also names a missing section when it reads one back, and
+`flex report -o table` does the same in its round-trip heading: the data is only
+as capable as the Flex query behind it, and that is a configuration choice the
+reader can act on.
 
 `sync` is idempotent and overlap-safe: rows are keyed by their IB transaction
 id, so re-syncing, re-fetching a corrected statement, or syncing overlapping
@@ -389,8 +405,17 @@ host — do not expose the container.
   number formatting, absent-value handling, Flex close detection, enum-sentinel
   handling and the date-time projection.
 
-Endpoint behaviour is verified against a running gateway; there is no in-repo
-gateway fixture yet.
+**Conformance vectors** (`conformance/vectors/*.json`, run by
+`cargo test --test conformance`) pin the gateway's Flex payload contract as
+data: what a conforming consumer must decode, store and answer. They are the
+executable form of what a statement actually does — blank enum attributes
+arriving as `null`, compact dates, `C;O` closes, lot rows arriving separately,
+identical lots belonging to different closes, cash `DETAIL` versus `SUMMARY`,
+zero-price assignment closes, overlapping report windows. See
+[`conformance/README.md`](conformance/README.md).
+
+Endpoint behaviour is otherwise verified against a running gateway; there is no
+in-repo gateway fixture yet.
 
 ## License
 

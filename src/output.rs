@@ -562,8 +562,8 @@ pub fn flex_report(outcome: &Conditional<FlexReportResponse>, mode: RenderMode) 
             ));
             print_table(&trades_table(value), mode)?;
 
-            let (label, closed) = round_trips(value);
-            note(&format!("{label} ({} rows)", closed.len()));
+            let (from_lots, closed) = round_trips(value);
+            note(&round_trip_note(from_lots, closed.len()));
             print_table(&round_trips_table(&closed), mode)?;
 
             let (detail, summaries) = cash_detail_rows(value);
@@ -607,16 +607,16 @@ fn trades_table(value: &FlexReportResponse) -> Table {
     trades
 }
 
-/// Rows and label for the round-trip projection.
+/// Rows for the round-trip projection, and whether they came from lots.
 ///
 /// Closed lots are the exact pairing — opening execution, close, matched
 /// quantity, cost basis, realized P/L. Without them, closing executions are the
 /// best available source: they carry the realized figure but rarely an open
 /// date.
-fn round_trips(value: &FlexReportResponse) -> (&'static str, Vec<&Trade>) {
+fn round_trips(value: &FlexReportResponse) -> (bool, Vec<&Trade>) {
     if value.lots.is_empty() {
         (
-            "closed trades",
+            false,
             value
                 .trades
                 .iter()
@@ -624,7 +624,22 @@ fn round_trips(value: &FlexReportResponse) -> (&'static str, Vec<&Trade>) {
                 .collect(),
         )
     } else {
-        ("closed lots", value.lots.iter().collect())
+        (true, value.lots.iter().collect())
+    }
+}
+
+/// Heading for the round-trip table, naming the remedy when there are no lots.
+///
+/// A report is only as capable as the Flex query behind it, and a missing
+/// section is a configuration choice the reader can fix.
+fn round_trip_note(from_lots: bool, rows: usize) -> String {
+    if from_lots {
+        format!("closed lots ({rows} rows)")
+    } else {
+        format!(
+            "closed trades ({rows} rows; no closed-lot rows in this report — add the Closed Lots \
+             level to the Flex query for exact pairing)"
+        )
     }
 }
 
@@ -830,6 +845,19 @@ pub fn store_sync(outcomes: &[crate::store::SyncOutcome], mode: RenderMode) -> R
                 "-".to_owned(),
                 opt_text(etag.as_deref()),
             ]),
+            // The sweep kept going: this report's failure is one row, and the
+            // command's exit code still reports it.
+            crate::store::SyncOutcome::Failed { report, message } => table.push(vec![
+                report.clone(),
+                "failed".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                message.clone(),
+            ]),
         }
     }
     print_table(&table, mode)
@@ -853,7 +881,77 @@ fn sync_outcome_json(outcome: &crate::store::SyncOutcome) -> serde_json::Value {
             "report": report,
             "etag": etag,
         }),
+        crate::store::SyncOutcome::Failed { report, message } => serde_json::json!({
+            "status": "failed",
+            "report": report,
+            "error": message,
+        }),
     }
+}
+
+/// Render what the store holds and what that is enough to answer.
+pub fn store_status(status: &crate::store::StoreStatus, mode: RenderMode) -> Result<()> {
+    if mode.output == crate::cli::Output::Json {
+        return json(status);
+    }
+    let mut table = Table::new(&[
+        "report",
+        "from",
+        "to",
+        "executions",
+        "lots",
+        "cash",
+        "skipped",
+        "synced at",
+    ]);
+    for report in &status.reports {
+        table.push(vec![
+            report.report.clone(),
+            opt_text(report.from_date.as_deref()),
+            opt_text(report.to_date.as_deref()),
+            report.executions.to_string(),
+            report.lots.to_string(),
+            report.cash_transactions.to_string(),
+            report.skipped.to_string(),
+            report.synced_at.clone(),
+        ]);
+    }
+    print_table(&table, mode)?;
+    note(&format!(
+        "store holds {} executions, {} closed lots, {} cash movements ({} dated)",
+        status.executions, status.lots, status.cash_transactions, status.cash_dated
+    ));
+    for line in capability_notes(&status.capabilities) {
+        note(&line);
+    }
+    Ok(())
+}
+
+/// What the stored data can and cannot answer, one line per gap.
+pub fn capability_notes(capabilities: &crate::store::SyncCapabilities) -> Vec<String> {
+    let mut lines = Vec::new();
+    if capabilities.round_trips {
+        lines.push("round trips: exact — closed lots are stored".to_owned());
+    } else {
+        lines.push(
+            "round trips: unavailable — no closed lots stored; add the Closed Lots level to the \
+             Flex query and re-sync with `store sync --refresh`"
+                .to_owned(),
+        );
+    }
+    if capabilities.cash_movements {
+        lines.push(if capabilities.cash_dates {
+            "cash movements: stored with dates".to_owned()
+        } else {
+            "cash movements: stored, but undated — grouping by month will not work".to_owned()
+        });
+    } else {
+        lines.push(
+            "cash movements: none stored — add the Cash Transactions section to the Flex query"
+                .to_owned(),
+        );
+    }
+    lines
 }
 
 /// Render rows returned by `store query`.
@@ -1093,6 +1191,95 @@ mod tests {
         assert!(closes_position(&trade(None, Some(0.01))));
         assert!(!closes_position(&trade(None, Some(0.0))));
         assert!(!closes_position(&trade(None, None)));
+    }
+
+    #[test]
+    fn the_round_trip_heading_names_the_fix_when_lots_are_missing() {
+        assert_eq!(round_trip_note(true, 12), "closed lots (12 rows)");
+        let fallback = round_trip_note(false, 12);
+        assert!(fallback.starts_with("closed trades (12 rows"));
+        assert!(fallback.contains("Closed Lots"), "{fallback}");
+        assert!(fallback.contains("exact pairing"), "{fallback}");
+    }
+
+    #[test]
+    fn a_failed_sync_is_rendered_as_a_row_and_as_json() {
+        use crate::store::SyncOutcome;
+
+        let outcomes = [
+            SyncOutcome::Failed {
+                report: "transactions_30d".to_owned(),
+                message: "rate limited (HTTP 429)".to_owned(),
+            },
+            SyncOutcome::NotModified {
+                report: "last_365_days".to_owned(),
+                etag: Some("\"abc\"".to_owned()),
+            },
+        ];
+        let json = sync_outcome_json(&outcomes[0]);
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["report"], "transactions_30d");
+        assert_eq!(json["error"], "rate limited (HTTP 429)");
+
+        // The table keeps one row per report, failure included, so a sweep
+        // never hides the part that did not work.
+        let rows: Vec<Vec<String>> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                SyncOutcome::Failed { report, message } => {
+                    vec![report.clone(), "failed".to_owned(), message.clone()]
+                }
+                SyncOutcome::NotModified { report, .. } => {
+                    vec![report.clone(), "not modified".to_owned(), "-".to_owned()]
+                }
+                SyncOutcome::Synced(stats) => {
+                    vec![stats.report.clone(), "synced".to_owned(), "-".to_owned()]
+                }
+            })
+            .collect();
+        assert_eq!(rows[0][1], "failed");
+        assert_eq!(rows[1][1], "not modified");
+    }
+
+    #[test]
+    fn capability_notes_say_what_is_missing_and_how_to_get_it() {
+        let none = crate::store::SyncCapabilities {
+            round_trips: false,
+            cash_movements: false,
+            cash_dates: false,
+        };
+        let lines = capability_notes(&none);
+        assert!(
+            lines.iter().any(|line| line.contains("Closed Lots")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Cash Transactions")),
+            "{lines:?}"
+        );
+
+        let all = crate::store::SyncCapabilities {
+            round_trips: true,
+            cash_movements: true,
+            cash_dates: true,
+        };
+        let lines = capability_notes(&all);
+        assert!(lines.iter().any(|line| line.contains("exact")), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("with dates")),
+            "{lines:?}"
+        );
+
+        let undated = crate::store::SyncCapabilities {
+            round_trips: true,
+            cash_movements: true,
+            cash_dates: false,
+        };
+        assert!(
+            capability_notes(&undated)
+                .iter()
+                .any(|line| line.contains("undated"))
+        );
     }
 
     #[test]

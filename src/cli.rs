@@ -813,6 +813,9 @@ pub enum StoreCommand {
 
     /// List the store's tables, views and columns.
     Schema,
+
+    /// Show what has been synced and which analyses the stored data supports.
+    Status,
 }
 
 impl StoreCommand {
@@ -822,6 +825,7 @@ impl StoreCommand {
             Self::Sync { .. } => "store sync",
             Self::Query { .. } => "store query",
             Self::Schema => "store schema",
+            Self::Status => "store status",
         }
     }
 }

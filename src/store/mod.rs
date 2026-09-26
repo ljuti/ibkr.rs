@@ -34,6 +34,52 @@ pub enum SyncOutcome {
         /// `ETag` the gateway confirmed.
         etag: Option<String>,
     },
+    /// This report failed; the sweep continued with the others.
+    Failed {
+        /// Report name.
+        report: String,
+        /// Rendered failure, as the command would print it.
+        message: String,
+    },
+}
+
+/// What a synced report can support, derived from what it delivered.
+///
+/// Flex statements only carry what the query asked for: a query without the
+/// Closed Lots level has no exact round trips, and one without Cash
+/// Transactions has no cash movements. Saying so where the sync finishes beats
+/// a reader discovering empty views later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncCapabilities {
+    /// Closed-lot rows arrived, so `round_trips` pairs exact lots.
+    pub round_trips: bool,
+    /// Cash movements (`DETAIL` rows) arrived.
+    pub cash_movements: bool,
+    /// Cash rows carry an event date.
+    pub cash_dates: bool,
+}
+
+impl SyncCapabilities {
+    /// Capabilities of one synced report, and why any are missing.
+    pub(super) fn of(stats: &SyncStats) -> (Self, Option<String>) {
+        let capabilities = Self {
+            round_trips: stats.lots > 0,
+            cash_movements: stats.cash_transactions > 0,
+            cash_dates: stats.cash_dated > 0,
+        };
+        let mut missing = Vec::new();
+        if stats.lots == 0 && stats.executions > 0 {
+            missing.push(
+                "no closed-lot rows: add the Closed Lots level to the Flex query for exact round trips",
+            );
+        }
+        if stats.cash_transactions == 0 && stats.skipped > 0 {
+            missing.push("no cash movements: add the Cash Transactions section to the Flex query");
+        }
+        let hint = (!missing.is_empty()).then(|| missing.join("; "));
+        (capabilities, hint)
+    }
 }
 
 use std::fs;
@@ -41,6 +87,7 @@ use std::path::Path;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::types::FlexReportResponse;
@@ -52,6 +99,48 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     /// One entry per row, aligned with [`Self::columns`].
     pub rows: Vec<Vec<Value>>,
+}
+
+/// One report's recorded sync state.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportStatus {
+    /// Report name.
+    pub report: String,
+    /// Statement window start.
+    pub from_date: Option<String>,
+    /// Statement window end.
+    pub to_date: Option<String>,
+    /// `ETag` from the last fetch.
+    pub etag: Option<String>,
+    /// Executions the report contributed.
+    pub executions: i64,
+    /// Closed lots it contributed.
+    pub lots: i64,
+    /// Cash movements it contributed.
+    pub cash_transactions: i64,
+    /// Rows it contributed that the store skips (aggregates, cash summaries).
+    pub skipped: i64,
+    /// When it was last synced.
+    pub synced_at: String,
+}
+
+/// What the store holds, and what that is enough to answer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreStatus {
+    /// Every report that has been synced.
+    pub reports: Vec<ReportStatus>,
+    /// Execution rows in the store (all reports combined).
+    pub executions: i64,
+    /// Closed-lot rows.
+    pub lots: i64,
+    /// Cash movement rows.
+    pub cash_transactions: i64,
+    /// Cash rows carrying an event date.
+    pub cash_dated: i64,
+    /// Which analyses the stored data supports.
+    pub capabilities: SyncCapabilities,
 }
 
 /// A table or view in the store.
@@ -163,6 +252,56 @@ impl Store {
             .optional()?
             .flatten();
         Ok(etag)
+    }
+
+    /// Sync state per report, plus what the stored rows can answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Store`] when the reads fail.
+    pub fn status(&self) -> Result<StoreStatus> {
+        let mut statement = self.connection.prepare(
+            "SELECT report, from_date, to_date, etag, executions, lots, cash_transactions, \
+                    skipped, synced_at \
+             FROM sync_state ORDER BY report",
+        )?;
+        let reports: Vec<ReportStatus> = statement
+            .query_map([], |row| {
+                Ok(ReportStatus {
+                    report: row.get(0)?,
+                    from_date: row.get(1)?,
+                    to_date: row.get(2)?,
+                    etag: row.get(3)?,
+                    executions: row.get(4)?,
+                    lots: row.get(5)?,
+                    cash_transactions: row.get(6)?,
+                    skipped: row.get(7)?,
+                    synced_at: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(statement);
+
+        let counts = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM executions), (SELECT COUNT(*) FROM closed_lots), \
+                    (SELECT COUNT(*) FROM cash_transactions), \
+                    (SELECT COUNT(*) FROM cash_transactions WHERE date IS NOT NULL)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let (executions, lots, cash_transactions, cash_dated) = counts;
+        Ok(StoreStatus {
+            reports,
+            executions,
+            lots,
+            cash_transactions,
+            cash_dated,
+            capabilities: SyncCapabilities {
+                round_trips: lots > 0,
+                cash_movements: cash_transactions > 0,
+                cash_dates: cash_dated > 0,
+            },
+        })
     }
 
     /// Run a read-only SQL statement and return its rows.
@@ -524,6 +663,99 @@ mod tests {
         );
         drop(store);
         cleanup(&path);
+    }
+
+    #[test]
+    fn status_reports_what_the_stored_rows_can_answer() {
+        let path = temp_store("status");
+        let mut store = Store::open(&path).unwrap();
+
+        // A report with executions only: nothing pairs, no cash.
+        let mut execution = trade("e1");
+        execution.open_close = Some("C".to_owned());
+        store
+            .upsert_report("bare", None, &payload(vec![execution], Vec::new()))
+            .unwrap();
+        let status = store.status().unwrap();
+        assert_eq!(status.reports.len(), 1);
+        assert_eq!(status.reports[0].report, "bare");
+        assert_eq!(status.executions, 1);
+        assert_eq!(status.lots, 0);
+        assert!(!status.capabilities.round_trips);
+        assert!(!status.capabilities.cash_movements);
+
+        // Now one with lots and a dated cash movement.
+        let mut lot = trade("open-1");
+        lot.level_of_detail = Some("CLOSED_LOT".to_owned());
+        lot.open_date_time = Some("20260807;120536".to_owned());
+        lot.trade_time = Some("20260828;123310".to_owned());
+        lot.trade_date = Some("2026-08-28".to_owned());
+        store
+            .upsert_report(
+                "full",
+                None,
+                &payload_with_lots(Vec::new(), vec![lot], vec![cash("c1", 42.5)]),
+            )
+            .unwrap();
+        let status = store.status().unwrap();
+        assert_eq!(status.reports.len(), 2);
+        assert_eq!(status.lots, 1);
+        assert_eq!(status.cash_transactions, 1);
+        assert_eq!(status.cash_dated, 1);
+        assert!(status.capabilities.round_trips);
+        assert!(status.capabilities.cash_movements);
+        assert!(status.capabilities.cash_dates);
+
+        // An undated cash row is stored but not usable as a time series.
+        let mut undated = cash("c2", 1.0);
+        undated.date = None;
+        store
+            .upsert_report(
+                "undated",
+                None,
+                &payload_with_lots(Vec::new(), Vec::new(), vec![undated]),
+            )
+            .unwrap();
+        let status = store.status().unwrap();
+        assert_eq!(status.cash_transactions, 2);
+        assert_eq!(status.cash_dated, 1);
+        assert!(status.capabilities.cash_dates);
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn capabilities_of_a_report_name_the_missing_sections() {
+        let mut stats = SyncStats {
+            report: "r".to_owned(),
+            from_date: None,
+            to_date: None,
+            executions: 10,
+            lots: 0,
+            cash_transactions: 0,
+            skipped: 4,
+            cash_dated: 0,
+            etag: None,
+        };
+        let (capabilities, hint) = SyncCapabilities::of(&stats);
+        assert!(!capabilities.round_trips);
+        let hint = hint.expect("a report without lots or cash has something to say");
+        assert!(hint.contains("Closed Lots"), "{hint}");
+        assert!(hint.contains("Cash Transactions"), "{hint}");
+
+        stats.lots = 3;
+        stats.cash_transactions = 2;
+        stats.cash_dated = 2;
+        let (capabilities, hint) = SyncCapabilities::of(&stats);
+        assert_eq!(
+            capabilities,
+            SyncCapabilities {
+                round_trips: true,
+                cash_movements: true,
+                cash_dates: true
+            }
+        );
+        assert!(hint.is_none(), "{hint:?}");
     }
 
     #[test]

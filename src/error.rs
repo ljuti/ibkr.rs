@@ -116,6 +116,17 @@ pub enum Error {
     #[error("invalid arguments: {0}")]
     Invalid(String),
 
+    /// Some reports synced and others did not; the sweep continued regardless.
+    #[error("{failed} of {total} reports failed: {detail}")]
+    Partial {
+        /// Reports that failed.
+        failed: usize,
+        /// Reports attempted.
+        total: usize,
+        /// Rendered failures, in the order they were attempted.
+        detail: String,
+    },
+
     /// The command is part of the planned surface but not implemented yet.
     #[error("{command} is not implemented yet")]
     Unimplemented {
