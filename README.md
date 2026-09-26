@@ -66,8 +66,12 @@ src/
   types.rs     # wire types (camelCase, timestamps as RFC 3339 strings)
 conformance/
   vectors/           # the gateway payload contract as data (see conformance/README.md)
+docs/
+  watch/             # upstream contract artifacts to watch (scripts/contract-watch.sh)
 scripts/
   gen-dev-certs.sh   # dev CA + server + client certificates
+  contract-watch.sh  # report changes in the watched upstream artifacts
+  canary.sh          # read-only smoke of a live gateway
 .devcontainer/       # Rust dev environment (compose form)
 deny.toml            # cargo-deny: licenses, advisories, bans, sources
 justfile             # task runner
@@ -351,6 +355,17 @@ just deny          # license/advisory/ban check (needs cargo-deny)
 
 Cargo aliases are defined in `.cargo/config.toml`: `cargo c` (check),
 `cargo t` (test), `cargo lint` (clippy, warnings as errors).
+
+`just canary` builds the release binary and smokes a live gateway with it
+(read-only: health, a contract lookup, a positions snapshot, and a Flex sync into
+a throwaway store). It is the check unit tests cannot be, and it belongs where
+the gateway is reachable — a cron on that host, or your own shell.
+
+`just contract-watch` hashes the upstream artifacts in `docs/watch/sources.txt`
+(the gateway's OpenAPI document and its two contract specs) and reports what
+moved, so schema drift surfaces before it reaches a release. `--update` records
+the new hashes once triaged; the same check runs daily in CI and opens an issue
+when something changes.
 
 `just run health` loads `.env` before running the binary, so it talks to the
 gateway `.env` names rather than the devcontainer's compose default. Plain

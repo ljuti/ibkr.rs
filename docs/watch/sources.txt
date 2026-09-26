@@ -1,0 +1,20 @@
+# Contract artifacts this client depends on, one per line:
+#
+#   <name> <url>
+#
+# Watched by scripts/contract-watch.sh, which hashes the body and reports a
+# change. Only stable machine artifacts belong here — raw JSON, OpenAPI
+# documents, raw changelogs. A rendered HTML page changes on every request.
+
+# The gateway's generated contract: the routes, envelopes, error kinds and field
+# names this client decodes. Published from the gateway repository, and the
+# source of the schema drift this watch exists to catch.
+gateway-openapi https://raw.githubusercontent.com/ljuti/ibkr-gateway/main/specs/openapi.json
+
+# The gateway's documented HTTP contract, which explains the parts of the
+# OpenAPI document that machines cannot: semantics, ordering, error kinds.
+gateway-contract https://raw.githubusercontent.com/ljuti/ibkr-gateway/main/specs/gateway-http-contract.md
+
+# The gateway's Flex report contract: the payload shapes behind `flex report`
+# and `store sync`, including the level-of-detail rules.
+gateway-flex-contract https://raw.githubusercontent.com/ljuti/ibkr-gateway/main/specs/flex-report-contract.md

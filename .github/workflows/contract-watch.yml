@@ -1,0 +1,65 @@
+name: Contract watch
+
+# The client decodes what the gateway publishes. When that contract moves, the
+# client is normally the first thing to notice — in production. This workflow
+# notices instead: it hashes the watched artifacts (docs/watch/sources.txt)
+# daily, records changes, and opens an issue for triage.
+#
+# It cannot run the canary: that needs a reachable gateway and its credentials,
+# so it belongs on the host that runs the gateway (scripts/canary.sh).
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check watched sources
+        id: check
+        run: |
+          scripts/contract-watch.sh --update | tee /tmp/report.txt
+          if git diff --quiet -- docs/watch/hashes.txt; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record the new hashes
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "contract-watch"
+          git config user.email "contract-watch@users.noreply.github.com"
+          git add docs/watch/hashes.txt
+          git commit -m "chore(watch): record upstream contract hashes"
+          git push
+
+      - name: Open an issue for triage
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "A watched upstream artifact changed. The client decodes these shapes, so"
+            echo "this is where schema drift shows up first."
+            echo
+            echo '```'
+            cat /tmp/report.txt
+            echo '```'
+            echo
+            echo "Triage: does the change touch what we decode — field names, enum"
+            echo "spellings, envelopes, routes, error kinds? If it does, add a case to"
+            echo "\`conformance/vectors/\` so the change is pinned, and fix the client."
+            echo "The new hashes were recorded on this branch by this run."
+          } > /tmp/issue.md
+          gh issue create \
+            --title "Upstream contract changed ($(date -u +%Y-%m-%d))" \
+            --body-file /tmp/issue.md

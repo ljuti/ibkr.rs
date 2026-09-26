@@ -61,6 +61,20 @@ run *args:
     if [ "${1:-}" = "--" ]; then shift; fi
     exec cargo run -- "$@"
 
+# Report changes in the upstream contract artifacts (docs/watch/sources.txt).
+# `just contract-watch --update` records the new hashes once triaged.
+[positional-arguments]
+contract-watch *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec ./scripts/contract-watch.sh "$@"
+
+# Smoke a live gateway through the built binary (read-only; changes nothing).
+# Needs a reachable, configured gateway: run it where the gateway is.
+canary:
+    cargo build --release
+    IBKR=target/release/ibkr ./scripts/canary.sh
+
 # Audit dependencies (licenses, advisories, bans).
 deny:
     cargo deny check

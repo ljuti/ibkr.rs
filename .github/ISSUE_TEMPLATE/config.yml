@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/ljuti/ibkr.rs/security/advisories/new
+    about: Report a vulnerability privately; see SECURITY.md
+  - name: The gateway itself
+    url: https://github.com/ljuti/ibkr-gateway/issues
+    about: Broker session problems, TLS, request pacing, Flex parsing — the gateway's repository

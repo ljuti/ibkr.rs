@@ -1,0 +1,1 @@
+# Hashes recorded by scripts/contract-watch.sh: "<sha256[:16]> <name>".
